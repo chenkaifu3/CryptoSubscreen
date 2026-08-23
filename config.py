@@ -161,10 +161,10 @@ DEFAULT_CONFIG = {
     },
     "weather": {
         "enabled": True,
-        "location_name": "岳麓 · 湘熙水郡",
+        "location_name": "长沙 · 岳麓区",
         "latitude": 28.13,
         "longitude": 112.95,
-        "update_ms": 900000,
+        "update_ms": 600000,
     },
     "proxy": "",
 }

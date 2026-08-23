@@ -246,7 +246,7 @@ class CoinManager:
             bd=0, activeforeground=self.TEXT, command=self._auto_save
         ).pack(side="left", padx=(2, 0))
         tk.Checkbutton(
-            opt_row, text="湘熙水郡天气", variable=self.weather_var,
+            opt_row, text="岳麓区天气", variable=self.weather_var,
             bg=self.CARD, fg=self.TEXT, selectcolor="#1A1A1A",
             activebackground=self.CARD, font=("Microsoft YaHei UI", 8),
             bd=0, activeforeground=self.TEXT, command=self._auto_save

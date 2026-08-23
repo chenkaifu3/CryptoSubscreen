@@ -87,7 +87,7 @@ def fetch_fear_greed(proxies=None):
 
 def get_hardware_stats():
     try:
-        cpu = psutil.cpu_percent(interval=None)
+        cpu = psutil.cpu_percent(interval=0.2)
         ram = psutil.virtual_memory().percent
         return {"cpu": f"{cpu:.0f}%", "ram": f"{ram:.0f}%"}
     except Exception:
@@ -181,8 +181,8 @@ class HyperCyberMonitor:
 
         self.weather_cfg = self.cfg.get("weather", {})
         self.weather_enabled = self.weather_cfg.get("enabled", True)
-        self.weather_location = self.weather_cfg.get("location_name", "岳麓 · 湘熙水郡")
-        self.weather_ms = self.weather_cfg.get("update_ms", 900000)
+        self.weather_location = self.weather_cfg.get("location_name", "长沙 · 岳麓区")
+        self.weather_ms = self.weather_cfg.get("update_ms", 600000)
         self.weather_data = None
 
         self.fng_data = None
@@ -436,10 +436,20 @@ class HyperCyberMonitor:
             max_idx = prices.index(max_p)
             min_idx = prices.index(min_p)
 
-            # 1. 绘制 24H 迷你成交量柱状图 (Volume Bars)
+            # 1. 计算折线图点集
+            for i, p in enumerate(prices):
+                curr_x = chart_left + (i / n) * chart_w
+                curr_y = (chart_bottom - 2) - ((p - min_p) / rng) * (chart_h - 6)
+                pts.extend([curr_x, curr_y])
+
+            # 2. 走势图半透明能量填充
+            poly_pts = [chart_left, chart_bottom] + pts + [chart_right, chart_bottom]
+            canvas.create_polygon(poly_pts, fill=chart_fill, outline="")
+
+            # 3. 绘制 24H 迷你成交量柱状图 (Volume Bars - 叠加在能量背景之上，鲜明可见)
             max_v = max(volumes) if volumes and max(volumes) > 0 else 1
-            bar_w = max(2, int((chart_w / len(raw_klines)) * 0.6))
-            vol_h_max = max(4, int(chart_h * 0.28))
+            bar_w = max(3, int((chart_w / len(raw_klines)) * 0.7))
+            vol_h_max = max(6, int(chart_h * 0.32))
             for i, k_item in enumerate(raw_klines):
                 if isinstance(k_item, dict):
                     v_val = k_item.get("volume", 0.0)
@@ -448,18 +458,12 @@ class HyperCyberMonitor:
                     vh = max(2, int((v_val / max_v) * vol_h_max))
                     vy1 = chart_bottom - vh
                     vy2 = chart_bottom
+                    v_border = self.theme["up_color"] if v_up else self.theme["down_color"]
                     v_fill = self.theme["up_badge_bg"] if v_up else self.theme["down_badge_bg"]
-                    canvas.create_rectangle(vx - bar_w / 2, vy1, vx + bar_w / 2, vy2, fill=v_fill, outline="")
-
-            # 2. 计算折线图点集
-            for i, p in enumerate(prices):
-                curr_x = chart_left + (i / n) * chart_w
-                curr_y = (chart_bottom - 2) - ((p - min_p) / rng) * (chart_h - 6)
-                pts.extend([curr_x, curr_y])
-
-            # 3. 走势图半透明能量填充
-            poly_pts = [chart_left, chart_bottom] + pts + [chart_right, chart_bottom]
-            canvas.create_polygon(poly_pts, fill=chart_fill, outline="")
+                    canvas.create_rectangle(
+                        vx - bar_w / 2, vy1, vx + bar_w / 2, vy2,
+                        fill=v_fill, outline=v_border, width=1
+                    )
 
             # 4. 霓虹发光衬底 (厚发光线)
             canvas.create_line(pts, fill=badge_bg, width=5, smooth=True)
@@ -642,7 +646,7 @@ class HyperCyberMonitor:
             self._safe_after(0, self.draw_weather_bar)
 
         threading.Thread(target=_fetch, daemon=True).start()
-        self._safe_after(4000, self.update_hardware)
+        self._safe_after(2000, self.update_hardware)
 
     def update_weather(self):
         if not self.weather_enabled:
