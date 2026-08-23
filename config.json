@@ -1,0 +1,32 @@
+{
+  "screen": {
+    "width": 1024,
+    "height": 768,
+    "x_offset": -1024,
+    "y_offset": 0
+  },
+  "symbols": [
+    "BTCUSDT",
+    "ETHUSDT",
+    "SOLUSDT",
+    "BNBUSDT"
+  ],
+  "update": {
+    "realtime_ms": 5000,
+    "klines_ms": 300000,
+    "klines_interval": "15m",
+    "klines_limit": 25
+  },
+  "display": {
+    "topmost": false,
+    "borderless": true,
+    "theme": "pure_white"
+  },
+  "weather": {
+    "enabled": true,
+    "location_name": "岳麓 · 湘熙水郡",
+    "latitude": 28.13,
+    "longitude": 112.95,
+    "update_ms": 900000
+  }
+}
