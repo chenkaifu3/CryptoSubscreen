@@ -85,9 +85,56 @@ def fetch_fear_greed(proxies=None):
         return None
 
 
+class _PDH_FMT_COUNTERVALUE(ctypes.Structure):
+    _fields_ = [
+        ("CStatus", ctypes.c_ulong),
+        ("doubleValue", ctypes.c_double),
+    ]
+
+
+class WindowsCPUCollector:
+    """与 Windows 任务管理器（Task Manager）完全一致的 CPU 总利用率采集器"""
+    def __init__(self):
+        self.hQuery = ctypes.c_void_p()
+        self.hCounter = ctypes.c_void_p()
+        self.initialized = False
+        try:
+            pdh = ctypes.windll.pdh
+            if pdh.PdhOpenQueryW(None, 0, ctypes.byref(self.hQuery)) == 0:
+                # 任务管理器指标: % Processor Utility (所有内核总利用率)
+                res = pdh.PdhAddEnglishCounterW(
+                    self.hQuery, "\\Processor Information(_Total)\\% Processor Utility", 0, ctypes.byref(self.hCounter)
+                )
+                if res != 0:
+                    res = pdh.PdhAddEnglishCounterW(
+                        self.hQuery, "\\Processor(_Total)\\% Processor Time", 0, ctypes.byref(self.hCounter)
+                    )
+                if res == 0:
+                    pdh.PdhCollectQueryData(self.hQuery)
+                    self.initialized = True
+        except Exception as e:
+            logger.warning("PDH 初始化失败，将回退到 psutil: %s", e)
+            self.initialized = False
+
+    def get_cpu_percent(self):
+        if self.initialized:
+            try:
+                pdh = ctypes.windll.pdh
+                pdh.PdhCollectQueryData(self.hQuery)
+                val = _PDH_FMT_COUNTERVALUE()
+                if pdh.PdhGetFormattedCounterValue(self.hCounter, 0x00000200, None, ctypes.byref(val)) == 0:
+                    return max(0.0, min(100.0, val.doubleValue))
+            except Exception:
+                pass
+        return psutil.cpu_percent(interval=None)
+
+
+cpu_collector = WindowsCPUCollector()
+
+
 def get_hardware_stats():
     try:
-        cpu = psutil.cpu_percent(interval=0.2)
+        cpu = cpu_collector.get_cpu_percent()
         ram = psutil.virtual_memory().percent
         return {"cpu": f"{cpu:.0f}%", "ram": f"{ram:.0f}%"}
     except Exception:
