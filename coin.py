@@ -1,9 +1,12 @@
 import json
 import logging
+import os
 import threading
+import time
 import tkinter as tk
 import webbrowser
 import ctypes
+from datetime import datetime
 
 try:
     ctypes.windll.shcore.SetProcessDpiAwareness(2)
@@ -13,12 +16,11 @@ except Exception:
     except Exception:
         pass
 
+import psutil
 import requests
 
 from config import THEMES, load_config
 from control import get_view_mode
-
-import os
 
 log_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "coin.log")
 logging.basicConfig(
@@ -56,6 +58,40 @@ WMO_WEATHER_MAP = {
     95: ("雷雨", "雷阵雨"),
     96: ("雷雹", "雷雨伴冰雹"),
 }
+
+FNG_CLASSIFICATION_MAP = {
+    "Extreme Fear": ("极度恐慌", "#FF2244"),
+    "Fear": ("恐慌", "#F97316"),
+    "Neutral": ("中性", "#EAB308"),
+    "Greed": ("贪婪", "#10B981"),
+    "Extreme Greed": ("极度贪婪", "#00FF9D"),
+}
+
+
+def fetch_fear_greed(proxies=None):
+    try:
+        url = "https://api.alternative.me/fng/?limit=1"
+        kwargs = {"timeout": 4, "headers": REQ_HEADERS}
+        if proxies:
+            kwargs["proxies"] = proxies
+        res = requests.get(url, **kwargs).json()
+        item = res.get("data", [{}])[0]
+        val = item.get("value", "50")
+        cls_raw = item.get("value_classification", "Neutral")
+        cls_cn, cls_col = FNG_CLASSIFICATION_MAP.get(cls_raw, (cls_raw, "#EAB308"))
+        return {"value": val, "text": cls_cn, "color": cls_col}
+    except Exception as e:
+        logger.warning("恐慌贪婪指数获取失败: %s", e)
+        return None
+
+
+def get_hardware_stats():
+    try:
+        cpu = psutil.cpu_percent(interval=None)
+        ram = psutil.virtual_memory().percent
+        return {"cpu": f"{cpu:.0f}%", "ram": f"{ram:.0f}%"}
+    except Exception:
+        return {"cpu": "--%", "ram": "--%"}
 
 
 def fetch_weather(lat=28.13, lon=112.95, proxies=None):
@@ -149,6 +185,11 @@ class HyperCyberMonitor:
         self.weather_ms = self.weather_cfg.get("update_ms", 900000)
         self.weather_data = None
 
+        self.fng_data = None
+        self.hw_data = {"cpu": "--%", "ram": "--%"}
+        self.prev_prices = {}
+        self.price_flash = {}
+
         self.history_data = {sym: [] for sym in self.symbols}
         self.realtime_stats = {sym: {"price_str": "", "change_str": "", "change_val": 0.0} for sym in self.symbols}
         self.overlay_visible = True
@@ -163,7 +204,7 @@ class HyperCyberMonitor:
         )
         self.root.configure(bg=self.theme["bg_win"])
 
-        # 顶部天气 HUD 状态栏
+        # 顶部天气与传感器 HUD 状态栏
         if self.weather_enabled:
             self.weather_frame = tk.Frame(self.root, bg=self.theme["bg_win"], height=38)
             self.weather_frame.pack(side="top", fill="x", padx=6, pady=(4, 0))
@@ -216,6 +257,9 @@ class HyperCyberMonitor:
 
         self.root.bind("<Button-3>", lambda e: self.root.destroy())
         self.update_weather()
+        self.update_fng()
+        self.update_hardware()
+        self.update_clock()
         self.update_klines()
         self.update_realtime()
         self.sync_view_mode()
@@ -224,6 +268,16 @@ class HyperCyberMonitor:
     def _on_canvas_configure(event, card_data):
         card_data["cw"] = event.width
         card_data["ch"] = event.height
+
+    def _clear_flash(self, sym):
+        if sym in self.price_flash:
+            del self.price_flash[sym]
+            stats = self.realtime_stats.get(sym)
+            if stats and stats["price_str"]:
+                self.draw_card(
+                    sym, stats["price_str"], stats["change_str"], stats["change_val"],
+                    stats.get("high_str", ""), stats.get("low_str", ""), stats.get("index", 0)
+                )
 
     def draw_card(self, sym, price_str, change_str, change_val, high_str="", low_str="", index=0):
         data = self.cards[sym]
@@ -251,7 +305,7 @@ class HyperCyberMonitor:
         border_color = self.theme["border"]
         inner_border = self.theme.get("inner_border", "#1E293B")
         accent_color = self.theme.get("accent_color", "#FFE600")
-        price_color = self.theme["price_color"]
+        price_color = self.price_flash.get(sym, self.theme["price_color"])
         sym_color = self.theme["sym_color"]
         grid_line = self.theme["grid_line"]
         hud_tag = self.theme.get("hud_tag", "HUD//01")
@@ -370,8 +424,11 @@ class HyperCyberMonitor:
 
             canvas.create_line(chart_left, chart_bottom, chart_right, chart_bottom, fill=grid_line, width=1)
 
-        prices = self.history_data[sym]
-        if chart_h >= 14 and chart_w > 20 and len(prices) >= 2:
+        raw_klines = self.history_data.get(sym, [])
+        if raw_klines and chart_h >= 14 and chart_w > 20 and len(raw_klines) >= 2:
+            prices = [k["close"] if isinstance(k, dict) else float(k) for k in raw_klines]
+            volumes = [k.get("volume", 0.0) if isinstance(k, dict) else 0.0 for k in raw_klines]
+
             min_p, max_p = min(prices), max(prices)
             rng = max_p - min_p if max_p != min_p else 1
             n = len(prices) - 1
@@ -379,22 +436,38 @@ class HyperCyberMonitor:
             max_idx = prices.index(max_p)
             min_idx = prices.index(min_p)
 
+            # 1. 绘制 24H 迷你成交量柱状图 (Volume Bars)
+            max_v = max(volumes) if volumes and max(volumes) > 0 else 1
+            bar_w = max(2, int((chart_w / len(raw_klines)) * 0.6))
+            vol_h_max = max(4, int(chart_h * 0.28))
+            for i, k_item in enumerate(raw_klines):
+                if isinstance(k_item, dict):
+                    v_val = k_item.get("volume", 0.0)
+                    v_up = k_item.get("is_up", True)
+                    vx = chart_left + (i / n) * chart_w
+                    vh = max(2, int((v_val / max_v) * vol_h_max))
+                    vy1 = chart_bottom - vh
+                    vy2 = chart_bottom
+                    v_fill = self.theme["up_badge_bg"] if v_up else self.theme["down_badge_bg"]
+                    canvas.create_rectangle(vx - bar_w / 2, vy1, vx + bar_w / 2, vy2, fill=v_fill, outline="")
+
+            # 2. 计算折线图点集
             for i, p in enumerate(prices):
                 curr_x = chart_left + (i / n) * chart_w
                 curr_y = (chart_bottom - 2) - ((p - min_p) / rng) * (chart_h - 6)
                 pts.extend([curr_x, curr_y])
 
-            # 1. 走势图半透明能量填充
+            # 3. 走势图半透明能量填充
             poly_pts = [chart_left, chart_bottom] + pts + [chart_right, chart_bottom]
             canvas.create_polygon(poly_pts, fill=chart_fill, outline="")
 
-            # 2. 霓虹发光衬底 (厚发光线)
+            # 4. 霓虹发光衬底 (厚发光线)
             canvas.create_line(pts, fill=badge_bg, width=5, smooth=True)
 
-            # 3. 亮色主折线
+            # 5. 亮色主折线
             canvas.create_line(pts, fill=theme_color, width=2.5, smooth=True)
 
-            # 4. 极值标注点
+            # 6. 极值标注点
             p_max_x = chart_left + (max_idx / n) * chart_w
             p_max_y = (chart_bottom - 2) - ((max_p - min_p) / rng) * (chart_h - 6)
             p_max_fill = "#2563EB" if self.theme_name == "pure_white" else "#FFFFFF"
@@ -404,7 +477,7 @@ class HyperCyberMonitor:
             p_min_y = (chart_bottom - 2) - ((min_p - min_p) / rng) * (chart_h - 6)
             canvas.create_oval(p_min_x - 2, p_min_y - 2, p_min_x + 2, p_min_y + 2, fill="#64748B", outline="")
 
-            # 5. 最新点科幻脉冲光标
+            # 7. 最新点科幻脉冲光标
             last_x, last_y = pts[-2], pts[-1]
             pulse_ring_fill = ""
             pulse_inner_fill = "#2563EB" if self.theme_name == "pure_white" else "#FFFFFF"
@@ -469,6 +542,7 @@ class HyperCyberMonitor:
         loc_bbox = self.weather_canvas.bbox(t_loc)
         next_x = (loc_bbox[2] if loc_bbox else 130) + 12
 
+        # 天气与温湿度
         if self.weather_data:
             desc = self.weather_data.get("desc", "晴")
             temp = self.weather_data.get("temp", "--°C")
@@ -483,9 +557,9 @@ class HyperCyberMonitor:
                 font=("Microsoft YaHei UI", 9, "bold"), fill=sym_color, anchor="w"
             )
             desc_bbox = self.weather_canvas.bbox(t_desc)
-            next_x = (desc_bbox[2] if desc_bbox else next_x + 40) + 14
+            next_x = (desc_bbox[2] if desc_bbox else next_x + 40) + 12
 
-            # 中间：温度与体感
+            # 温度
             t_temp = self.weather_canvas.create_text(
                 next_x, y_center, text=f"🌡️ {temp}",
                 font=("Consolas", 10, "bold"), fill=price_color, anchor="w"
@@ -493,16 +567,16 @@ class HyperCyberMonitor:
             temp_bbox = self.weather_canvas.bbox(t_temp)
             next_x = (temp_bbox[2] if temp_bbox else next_x + 55) + 6
 
-            if feels and w >= 500:
+            if feels and w >= 550:
                 t_feels = self.weather_canvas.create_text(
                     next_x, y_center, text=f"(体感 {feels})",
                     font=("Microsoft YaHei UI", 8), fill=muted_color, anchor="w"
                 )
                 feels_bbox = self.weather_canvas.bbox(t_feels)
-                next_x = (feels_bbox[2] if feels_bbox else next_x + 65) + 12
+                next_x = (feels_bbox[2] if feels_bbox else next_x + 65) + 10
 
             # 湿度
-            if w >= 400:
+            if w >= 440:
                 t_hum = self.weather_canvas.create_text(
                     next_x, y_center, text=f"💧 湿度 {humidity}",
                     font=("Microsoft YaHei UI", 9), fill=sym_color, anchor="w"
@@ -510,25 +584,65 @@ class HyperCyberMonitor:
                 hum_bbox = self.weather_canvas.bbox(t_hum)
                 next_x = (hum_bbox[2] if hum_bbox else next_x + 65) + 12
 
-            # 风速
-            if wind and w >= 600:
-                self.weather_canvas.create_text(
-                    next_x, y_center, text=f"💨 {wind}",
-                    font=("Consolas", 8), fill=muted_color, anchor="w"
-                )
+        # 3. 中间区域：全市场情绪 + 电脑硬件监控
+        if self.fng_data and w >= 660:
+            fng_txt = f"😱 情绪 {self.fng_data['value']} {self.fng_data['text']}"
+            t_fng = self.weather_canvas.create_text(
+                next_x, y_center, text=fng_txt,
+                font=("Microsoft YaHei UI", 9, "bold"), fill=self.fng_data["color"], anchor="w"
+            )
+            fng_bbox = self.weather_canvas.bbox(t_fng)
+            next_x = (fng_bbox[2] if fng_bbox else next_x + 80) + 12
 
-            # 右侧：今日区间与 LIVE 指示灯
-            right_text = f"今日 {t_range}  " if (t_range and w >= 520) else ""
-            self.weather_canvas.create_text(
-                w - 26, y_center, text=right_text,
-                font=("Consolas", 8, "bold"), fill=muted_color, anchor="e"
+        if self.hw_data and w >= 780:
+            hw_txt = f"💻 CPU:{self.hw_data['cpu']} RAM:{self.hw_data['ram']}"
+            t_hw = self.weather_canvas.create_text(
+                next_x, y_center, text=hw_txt,
+                font=("Consolas", 9), fill=muted_color, anchor="w"
             )
-            self.weather_canvas.create_oval(w - 18, y_center - 3, w - 12, y_center + 3, fill=up_color, outline="")
-        else:
-            self.weather_canvas.create_text(
-                next_x, y_center, text="正在同步岳麓区气象数据...",
-                font=("Microsoft YaHei UI", 8), fill=muted_color, anchor="w"
-            )
+
+        # 4. 右侧区域：数字时钟 + 实时呼吸灯
+        now = datetime.now()
+        weekdays = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
+        weekday_str = weekdays[now.weekday()]
+        clock_str = now.strftime(f"%H:%M:%S {weekday_str} %m-%d")
+
+        self.weather_canvas.create_text(
+            w - 28, y_center, text=clock_str,
+            font=("Consolas", 9, "bold"), fill=sym_color, anchor="e"
+        )
+        self.weather_canvas.create_oval(w - 18, y_center - 3, w - 12, y_center + 3, fill=up_color, outline="")
+
+    def _safe_after(self, ms, func):
+        try:
+            if hasattr(self, "root") and self.root.winfo_exists():
+                self.root.after(ms, func)
+        except Exception:
+            pass
+
+    def update_clock(self):
+        if self.weather_enabled and hasattr(self, "weather_canvas"):
+            self.draw_weather_bar()
+        self._safe_after(1000, self.update_clock)
+
+    def update_fng(self):
+        def _fetch():
+            data = fetch_fear_greed(self.proxies)
+            if data:
+                self.fng_data = data
+                self._safe_after(0, self.draw_weather_bar)
+
+        threading.Thread(target=_fetch, daemon=True).start()
+        self._safe_after(1800000, self.update_fng)
+
+    def update_hardware(self):
+        def _fetch():
+            stats = get_hardware_stats()
+            self.hw_data = stats
+            self._safe_after(0, self.draw_weather_bar)
+
+        threading.Thread(target=_fetch, daemon=True).start()
+        self._safe_after(4000, self.update_hardware)
 
     def update_weather(self):
         if not self.weather_enabled:
@@ -540,10 +654,10 @@ class HyperCyberMonitor:
             data = fetch_weather(lat, lon, self.proxies)
             if data:
                 self.weather_data = data
-                self.root.after(0, self.draw_weather_bar)
+                self._safe_after(0, self.draw_weather_bar)
 
         threading.Thread(target=_fetch, daemon=True).start()
-        self.root.after(self.weather_ms, self.update_weather)
+        self._safe_after(self.weather_ms, self.update_weather)
 
     def get_klines(self, symbol):
         for host in BINANCE_HOSTS:
@@ -554,7 +668,14 @@ class HyperCyberMonitor:
                     kwargs["proxies"] = self.proxies
                 res = requests.get(url, **kwargs).json()
                 if isinstance(res, list):
-                    return [float(k[4]) for k in res]
+                    return [
+                        {
+                            "close": float(k[4]),
+                            "volume": float(k[5]),
+                            "is_up": float(k[4]) >= float(k[1]),
+                        }
+                        for k in res
+                    ]
             except Exception:
                 continue
         logger.warning("K线数据请求失败: %s", symbol)
@@ -573,10 +694,10 @@ class HyperCyberMonitor:
             for t in threads:
                 t.join(timeout=5)
             # 回到主线程更新数据
-            self.root.after(0, lambda: self._apply_klines(results))
+            self._safe_after(0, lambda: self._apply_klines(results))
 
         threading.Thread(target=_fetch_all, daemon=True).start()
-        self.root.after(self.klines_ms, self.update_klines)
+        self._safe_after(self.klines_ms, self.update_klines)
 
     def _apply_klines(self, results):
         for sym, data in results.items():
@@ -607,10 +728,10 @@ class HyperCyberMonitor:
                     continue
 
             # 回到主线程更新 UI
-            self.root.after(0, lambda: self._apply_realtime(stats))
+            self._safe_after(0, lambda: self._apply_realtime(stats))
 
         threading.Thread(target=_fetch_realtime, daemon=True).start()
-        self.root.after(self.realtime_ms, self.update_realtime)
+        self._safe_after(self.realtime_ms, self.update_realtime)
 
     def _apply_realtime(self, stats):
         for i, sym in enumerate(self.symbols):
@@ -641,6 +762,17 @@ class HyperCyberMonitor:
                 l_text = _fmt_hl(l_val) if l_val else ""
 
                 c_text = f"{change:+.2f}%"
+
+                # 价格呼吸闪烁微动效判断
+                old_p = self.prev_prices.get(sym)
+                if old_p is not None and old_p != price:
+                    if price > old_p:
+                        self.price_flash[sym] = self.theme["up_color"]
+                    else:
+                        self.price_flash[sym] = self.theme["down_color"]
+                    self.root.after(800, lambda s=sym: self._clear_flash(s))
+                self.prev_prices[sym] = price
+
                 self.realtime_stats[sym] = {
                     "price_str": p_text,
                     "change_str": c_text,
@@ -671,3 +803,4 @@ class HyperCyberMonitor:
 if __name__ == "__main__":
     app = HyperCyberMonitor()
     app.run()
+
