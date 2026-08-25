@@ -335,6 +335,14 @@ class CoinManager:
         self.launch_btn.pack(side="left", fill="x", expand=True, padx=(0, 6))
         self._apply_btn_style(self.launch_btn, "green")
 
+        self.mate_btn = tk.Button(
+            btn_box, text="🐾 启动桌宠", command=self._launch_digital_mate,
+            relief="flat", bd=0, padx=12, pady=7,
+            font=("Microsoft YaHei UI", 9, "bold"),
+        )
+        self.mate_btn.pack(side="left", padx=(0, 6))
+        self._apply_btn_style(self.mate_btn, "accent_border")
+
         self.hide_btn = tk.Button(
             btn_box, text="最小化到托盘", command=self._hide_to_tray,
             relief="flat", bd=0, padx=12, pady=7,
@@ -689,10 +697,48 @@ class CoinManager:
         d.ellipse([47, 15, 53, 21], fill="#FFFFFF")
         return img
 
+    def _launch_digital_mate(self):
+        desktop = os.path.join(os.path.expanduser("~"), "Desktop")
+        candidates = [
+            os.path.join(desktop, "DigitalMate.exe.lnk"),
+            os.path.join(desktop, "DigitalMate.lnk"),
+            os.path.join(desktop, "DigitalMate.exe"),
+            r"E:\download\BaiduNetdiskDownload\XJ03886\XJ03886\Digital Mate\DigitalMate.exe",
+        ]
+        target = None
+        for path in candidates:
+            if os.path.exists(path):
+                target = path
+                break
+
+        if not target:
+            try:
+                for root, _, files in os.walk(desktop):
+                    for f in files:
+                        if "digitalmate" in f.lower() and (f.endswith(".lnk") or f.endswith(".exe")):
+                            target = os.path.join(root, f)
+                            break
+                    if target:
+                        break
+            except Exception:
+                pass
+
+        if target:
+            try:
+                os.startfile(target)
+                self._set_status("已启动桌宠 DigitalMate", self.GREEN)
+            except Exception as e:
+                self._set_status(f"启动桌宠失败: {e}", self.RED)
+                messagebox.showerror("启动失败", f"启动桌宠程序失败:\n{e}")
+        else:
+            self._set_status("未找到桌宠 DigitalMate.exe", self.RED)
+            messagebox.showwarning("未找到程序", "未在桌面或默认路径找到 DigitalMate.exe 或其快捷方式。")
+
     def _init_tray(self):
         menu = pystray.Menu(
             pystray.MenuItem("显示管理面板", self._on_tray_show, default=True),
             pystray.MenuItem("启动/关闭副屏", self._on_tray_toggle),
+            pystray.MenuItem("🐾 启动桌宠 (DigitalMate)", lambda icon, item: self.root.after(0, self._launch_digital_mate)),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("退出程序", self._on_tray_exit),
         )
