@@ -109,6 +109,7 @@ class CoinManager:
         self.symbols_var = tk.StringVar()
         self.theme_var = tk.StringVar(value=self.cfg["display"].get("theme", "cyberpunk"))
         self.weather_var = tk.BooleanVar(value=self.cfg.get("weather", {}).get("enabled", True))
+        self.gaming_var = tk.BooleanVar(value=self.cfg.get("gaming_mode", {}).get("enabled", True))
         self.theme_btns = {}
 
         self._build_ui()
@@ -247,6 +248,12 @@ class CoinManager:
         ).pack(side="left", padx=(2, 0))
         tk.Checkbutton(
             opt_row, text="岳麓区天气", variable=self.weather_var,
+            bg=self.CARD, fg=self.TEXT, selectcolor="#1A1A1A",
+            activebackground=self.CARD, font=("Microsoft YaHei UI", 8),
+            bd=0, activeforeground=self.TEXT, command=self._auto_save
+        ).pack(side="left", padx=(2, 0))
+        tk.Checkbutton(
+            opt_row, text="游戏防卡顿", variable=self.gaming_var,
             bg=self.CARD, fg=self.TEXT, selectcolor="#1A1A1A",
             activebackground=self.CARD, font=("Microsoft YaHei UI", 8),
             bd=0, activeforeground=self.TEXT, command=self._auto_save
@@ -412,6 +419,7 @@ class CoinManager:
         self.borderless_var.set(self.cfg["display"].get("borderless", True))
         self.theme_var.set(self.cfg["display"].get("theme", "cyberpunk"))
         self.weather_var.set(self.cfg.get("weather", {}).get("enabled", True))
+        self.gaming_var.set(self.cfg.get("gaming_mode", {}).get("enabled", True))
         self._update_theme_btn_styles()
 
         if self.monitors:
@@ -513,12 +521,20 @@ class CoinManager:
 
         weather_cfg = self.cfg.get("weather", {
             "enabled": True,
-            "location_name": "岳麓 · 湘熙水郡",
+            "location_name": "长沙 · 岳麓区",
             "latitude": 28.13,
             "longitude": 112.95,
-            "update_ms": 900000
+            "update_ms": 600000
         })
         weather_cfg["enabled"] = self.weather_var.get()
+
+        gaming_cfg = self.cfg.get("gaming_mode", {
+            "enabled": True,
+            "detect_lol": True,
+            "detect_fullscreen": True,
+            "pause_price_flash": True
+        })
+        gaming_cfg["enabled"] = self.gaming_var.get()
 
         return {
             "screen": {
@@ -535,6 +551,8 @@ class CoinManager:
                 "theme": self.theme_var.get(),
             },
             "weather": weather_cfg,
+            "gaming_mode": gaming_cfg,
+            "proxy": self.cfg.get("proxy", ""),
         }
 
     def _auto_save(self):

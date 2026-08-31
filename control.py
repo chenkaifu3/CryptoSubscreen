@@ -7,11 +7,19 @@ CONTROL_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "control
 DEFAULT_CONTROL = {"view_mode": "dashboard"}
 
 
-import time
+_CONTROL_CACHE = {"mtime": 0.0, "data": copy.deepcopy(DEFAULT_CONTROL)}
+
 
 def load_control():
     if not os.path.exists(CONTROL_PATH):
         return copy.deepcopy(DEFAULT_CONTROL)
+    try:
+        current_mtime = os.path.getmtime(CONTROL_PATH)
+        if current_mtime == _CONTROL_CACHE["mtime"]:
+            return copy.deepcopy(_CONTROL_CACHE["data"])
+    except OSError:
+        pass
+
     for _ in range(5):
         try:
             with open(CONTROL_PATH, "r", encoding="utf-8") as f:
@@ -19,7 +27,13 @@ def load_control():
             mode = data.get("view_mode", "dashboard")
             if mode not in ("dashboard", "desktop"):
                 mode = "dashboard"
-            return {"view_mode": mode}
+            res = {"view_mode": mode}
+            try:
+                _CONTROL_CACHE["mtime"] = os.path.getmtime(CONTROL_PATH)
+                _CONTROL_CACHE["data"] = res
+            except OSError:
+                pass
+            return copy.deepcopy(res)
         except (json.JSONDecodeError, OSError):
             time.sleep(0.05)
     return copy.deepcopy(DEFAULT_CONTROL)

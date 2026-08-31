@@ -166,6 +166,12 @@ DEFAULT_CONFIG = {
         "longitude": 112.95,
         "update_ms": 600000,
     },
+    "gaming_mode": {
+        "enabled": True,
+        "detect_lol": True,
+        "detect_fullscreen": True,
+        "pause_price_flash": True,
+    },
     "proxy": "",
 }
 
@@ -180,7 +186,7 @@ def load_config():
         return copy.deepcopy(DEFAULT_CONFIG)
 
     cfg = copy.deepcopy(DEFAULT_CONFIG)
-    for key in ("screen", "update", "display", "weather"):
+    for key in ("screen", "update", "display", "weather", "gaming_mode"):
         if key in data and isinstance(data[key], dict):
             cfg[key].update(data[key])
     if "symbols" in data and isinstance(data["symbols"], list):

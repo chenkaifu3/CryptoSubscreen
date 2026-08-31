@@ -1,12 +1,15 @@
+import copy
+import ctypes
+from ctypes import wintypes
+from datetime import datetime
 import json
 import logging
 import os
+import sys
 import threading
 import time
 import tkinter as tk
 import webbrowser
-import ctypes
-from datetime import datetime
 
 try:
     ctypes.windll.shcore.SetProcessDpiAwareness(2)
@@ -68,21 +71,13 @@ FNG_CLASSIFICATION_MAP = {
 }
 
 
-def fetch_fear_greed(proxies=None):
-    try:
-        url = "https://api.alternative.me/fng/?limit=1"
-        kwargs = {"timeout": 4, "headers": REQ_HEADERS}
-        if proxies:
-            kwargs["proxies"] = proxies
-        res = requests.get(url, **kwargs).json()
-        item = res.get("data", [{}])[0]
-        val = item.get("value", "50")
-        cls_raw = item.get("value_classification", "Neutral")
-        cls_cn, cls_col = FNG_CLASSIFICATION_MAP.get(cls_raw, (cls_raw, "#EAB308"))
-        return {"value": val, "text": cls_cn, "color": cls_col}
-    except Exception as e:
-        logger.warning("恐慌贪婪指数获取失败: %s", e)
-        return None
+class _RECT(ctypes.Structure):
+    _fields_ = [
+        ("left", ctypes.c_long),
+        ("top", ctypes.c_long),
+        ("right", ctypes.c_long),
+        ("bottom", ctypes.c_long),
+    ]
 
 
 class _PDH_FMT_COUNTERVALUE(ctypes.Structure):
@@ -129,16 +124,53 @@ class WindowsCPUCollector:
         return psutil.cpu_percent(interval=None)
 
 
-cpu_collector = WindowsCPUCollector()
-
-
-def get_hardware_stats():
+def check_gaming_status():
+    """轻量级检测前台游戏与英雄联盟对局状态"""
+    # 1. 常见游戏进程识别
+    game_processes = {
+        "league of legends.exe", "leagueclientux.exe", "game.exe",
+        "valorant.exe", "cs2.exe", "dota2.exe", "gta5.exe",
+        "overwatch.exe", "genshinimpact.exe", "starrail.exe",
+        "naraka.exe", "blackmythwukong.exe", "crossfire.exe"
+    }
     try:
-        cpu = cpu_collector.get_cpu_percent()
-        ram = psutil.virtual_memory().percent
-        return {"cpu": f"{cpu:.0f}%", "ram": f"{ram:.0f}%"}
+        for p in psutil.process_iter(["name"]):
+            pname = (p.info.get("name") or "").lower()
+            if pname in game_processes:
+                return True
     except Exception:
-        return {"cpu": "--%", "ram": "--%"}
+        pass
+
+    # 2. 前台全屏独占窗口检测 (避免与主屏全屏游戏竞争 DWM 资源)
+    try:
+        hwnd = ctypes.windll.user32.GetForegroundWindow()
+        if hwnd:
+            rect = _RECT()
+            ctypes.windll.user32.GetWindowRect(hwnd, ctypes.byref(rect))
+            sw = ctypes.windll.user32.GetSystemMetrics(0)
+            sh = ctypes.windll.user32.GetSystemMetrics(1)
+            if (rect.right - rect.left >= sw) and (rect.bottom - rect.top >= sh):
+                return True
+    except Exception:
+        pass
+    return False
+
+
+def fetch_fear_greed(proxies=None):
+    try:
+        url = "https://api.alternative.me/fng/?limit=1"
+        kwargs = {"timeout": 4, "headers": REQ_HEADERS}
+        if proxies:
+            kwargs["proxies"] = proxies
+        res = requests.get(url, **kwargs).json()
+        item = res.get("data", [{}])[0]
+        val = item.get("value", "50")
+        cls_raw = item.get("value_classification", "Neutral")
+        cls_cn, cls_col = FNG_CLASSIFICATION_MAP.get(cls_raw, (cls_raw, "#EAB308"))
+        return {"value": val, "text": cls_cn, "color": cls_col}
+    except Exception as e:
+        logger.warning("恐慌贪婪指数获取失败: %s", e)
+        return None
 
 
 def fetch_weather(lat=28.13, lon=112.95, proxies=None):
@@ -204,6 +236,128 @@ def fetch_weather(lat=28.13, lon=112.95, proxies=None):
         return None
 
 
+class BackendWorker:
+    """统一常驻守护工作线程：负责所有网络拉取与硬件监控，零临时线程开销"""
+    def __init__(self, monitor_app):
+        self.app = monitor_app
+        self.running = True
+        self.cpu_collector = WindowsCPUCollector()
+
+        self.last_ticker_time = 0.0
+        self.last_klines_time = 0.0
+        self.last_hw_time = 0.0
+        self.last_weather_time = 0.0
+        self.last_fng_time = 0.0
+        self.last_game_check_time = 0.0
+
+        self.thread = threading.Thread(target=self._run_loop, daemon=True, name="DashboardWorker")
+        self.thread.start()
+
+    def stop(self):
+        self.running = False
+
+    def _run_loop(self):
+        while self.running:
+            now = time.time()
+            is_gaming = self.app.is_gaming
+            gaming_enabled = self.app.gaming_mode_enabled
+
+            # 1. 游戏状态检测 (每 2.5 秒)
+            if gaming_enabled and (now - self.last_game_check_time >= 2.5):
+                self.last_game_check_time = now
+                detected = check_gaming_status()
+                if detected != self.app.is_gaming:
+                    self.app.is_gaming = detected
+                    self.app.safe_ui_call(self.app.on_gaming_status_changed, detected)
+
+            # 2. 硬件采集 (正常 2 秒 / 游戏对局 6 秒)
+            hw_interval = 6.0 if is_gaming else 2.0
+            if now - self.last_hw_time >= hw_interval:
+                self.last_hw_time = now
+                try:
+                    cpu_val = self.cpu_collector.get_cpu_percent()
+                    ram_val = psutil.virtual_memory().percent
+                    hw_stats = {"cpu": f"{cpu_val:.0f}%", "ram": f"{ram_val:.0f}%"}
+                    self.app.safe_ui_call(self.app.apply_hardware_stats, hw_stats)
+                except Exception:
+                    pass
+
+            # 3. 实时行情拉取 (正常 3~5 秒 / 游戏对局 8 秒)
+            ticker_interval = 8.0 if is_gaming else (self.app.realtime_ms / 1000.0)
+            if now - self.last_ticker_time >= ticker_interval:
+                self.last_ticker_time = now
+                self._fetch_ticker()
+
+            # 4. K线数据拉取 (每 300 秒)
+            klines_interval = self.app.klines_ms / 1000.0
+            if now - self.last_klines_time >= klines_interval or self.last_klines_time == 0.0:
+                self.last_klines_time = now
+                self._fetch_klines()
+
+            # 5. 天气数据拉取 (每 600 秒)
+            weather_interval = self.app.weather_ms / 1000.0
+            if self.app.weather_enabled and (now - self.last_weather_time >= weather_interval or self.last_weather_time == 0.0):
+                self.last_weather_time = now
+                lat = self.app.weather_cfg.get("latitude", 28.13)
+                lon = self.app.weather_cfg.get("longitude", 112.95)
+                w_data = fetch_weather(lat, lon, self.app.proxies)
+                if w_data:
+                    self.app.safe_ui_call(self.app.apply_weather_data, w_data)
+
+            # 6. 恐慌贪婪指数拉取 (每 1800 秒)
+            if now - self.last_fng_time >= 1800.0 or self.last_fng_time == 0.0:
+                self.last_fng_time = now
+                fng = fetch_fear_greed(self.app.proxies)
+                if fng:
+                    self.app.safe_ui_call(self.app.apply_fng_data, fng)
+
+            time.sleep(0.3)
+
+    def _fetch_ticker(self):
+        try:
+            symbols_json = json.dumps(self.app.symbols, separators=(",", ":"))
+            for host in BINANCE_HOSTS:
+                try:
+                    url = f"{host}/api/v3/ticker/24hr"
+                    kwargs = {"params": {"symbols": symbols_json}, "timeout": 3, "headers": REQ_HEADERS}
+                    if self.app.proxies:
+                        kwargs["proxies"] = self.app.proxies
+                    res = requests.get(url, **kwargs).json()
+                    if isinstance(res, list):
+                        stats = {item["symbol"]: item for item in res}
+                        self.app.safe_ui_call(self.app.apply_realtime_stats, stats)
+                        break
+                except Exception:
+                    continue
+        except Exception:
+            pass
+
+    def _fetch_klines(self):
+        results = {}
+        for sym in self.app.symbols:
+            for host in BINANCE_HOSTS:
+                try:
+                    url = f"{host}/api/v3/klines?symbol={sym}&interval={self.app.klines_interval}&limit={self.app.klines_limit}"
+                    kwargs = {"timeout": 3, "headers": REQ_HEADERS}
+                    if self.app.proxies:
+                        kwargs["proxies"] = self.app.proxies
+                    res = requests.get(url, **kwargs).json()
+                    if isinstance(res, list):
+                        results[sym] = [
+                            {
+                                "close": float(k[4]),
+                                "volume": float(k[5]),
+                                "is_up": float(k[4]) >= float(k[1]),
+                            }
+                            for k in res
+                        ]
+                        break
+                except Exception:
+                    continue
+        if results:
+            self.app.safe_ui_call(self.app.apply_klines_data, results)
+
+
 class HyperCyberMonitor:
     def __init__(self):
         self.cfg = load_config()
@@ -232,6 +386,11 @@ class HyperCyberMonitor:
         self.weather_ms = self.weather_cfg.get("update_ms", 600000)
         self.weather_data = None
 
+        self.gaming_cfg = self.cfg.get("gaming_mode", {})
+        self.gaming_mode_enabled = self.gaming_cfg.get("enabled", True)
+        self.pause_price_flash_in_game = self.gaming_cfg.get("pause_price_flash", True)
+        self.is_gaming = False
+
         self.fng_data = None
         self.hw_data = {"cpu": "--%", "ram": "--%"}
         self.prev_prices = {}
@@ -252,12 +411,15 @@ class HyperCyberMonitor:
         self.root.configure(bg=self.theme["bg_win"])
 
         # 顶部天气与传感器 HUD 状态栏
+        self.weather_ids = {}
+        self.weather_w = 0
+        self.weather_h = 0
         if self.weather_enabled:
             self.weather_frame = tk.Frame(self.root, bg=self.theme["bg_win"], height=38)
             self.weather_frame.pack(side="top", fill="x", padx=6, pady=(4, 0))
             self.weather_canvas = tk.Canvas(self.weather_frame, bg=self.theme["bg_win"], height=34, highlightthickness=0, bd=0)
             self.weather_canvas.pack(fill="both", expand=True)
-            self.weather_canvas.bind("<Configure>", lambda e: self.draw_weather_bar())
+            self.weather_canvas.bind("<Configure>", lambda e: self._on_weather_configure(e))
 
         self.container = tk.Frame(self.root, bg=self.theme["bg_win"])
         self.container.pack(side="top", expand=True, fill="both")
@@ -294,31 +456,45 @@ class HyperCyberMonitor:
                 ),
             )
 
-            # 通过 <Configure> 事件缓存 canvas 尺寸
-            card_data = {"canvas": canvas, "cw": 1, "ch": 1}
+            card_data = {
+                "canvas": canvas, "cw": 1, "ch": 1,
+                "initialized": False, "ids": {}, "index": i
+            }
             canvas.bind(
                 "<Configure>",
-                lambda e, d=card_data: self._on_canvas_configure(e, d),
+                lambda e, d=card_data, s=sym: self._on_card_configure(e, d, s),
             )
             self.cards[sym] = card_data
 
         self.root.bind("<Button-3>", lambda e: self.root.destroy())
-        self.update_weather()
-        self.update_fng()
-        self.update_hardware()
+
+        # 启动后台常驻守护工作线程
+        self.worker = BackendWorker(self)
+
+        # 启动主线程轻量时钟 (增量修改文字，不销毁画布)
         self.update_clock()
-        self.update_klines()
-        self.update_realtime()
         self.sync_view_mode()
 
-    @staticmethod
-    def _on_canvas_configure(event, card_data):
-        card_data["cw"] = event.width
-        card_data["ch"] = event.height
+    def safe_ui_call(self, func, *args):
+        """线程安全的主线程调度"""
+        try:
+            if hasattr(self, "root") and self.root.winfo_exists():
+                self.root.after(0, lambda: func(*args))
+        except Exception:
+            pass
 
-    def _clear_flash(self, sym):
-        if sym in self.price_flash:
-            del self.price_flash[sym]
+    def _on_weather_configure(self, event):
+        if event.width != self.weather_w or event.height != self.weather_h:
+            self.weather_w = event.width
+            self.weather_h = event.height
+            self._rebuild_weather_static()
+            self.draw_weather_bar()
+
+    def _on_card_configure(self, event, card_data, sym):
+        if event.width != card_data["cw"] or event.height != card_data["ch"] or not card_data["initialized"]:
+            card_data["cw"] = event.width
+            card_data["ch"] = event.height
+            self._init_card_canvas(sym, event.width, event.height)
             stats = self.realtime_stats.get(sym)
             if stats and stats["price_str"]:
                 self.draw_card(
@@ -326,239 +502,15 @@ class HyperCyberMonitor:
                     stats.get("high_str", ""), stats.get("low_str", ""), stats.get("index", 0)
                 )
 
-    def draw_card(self, sym, price_str, change_str, change_val, high_str="", low_str="", index=0):
-        data = self.cards[sym]
-        canvas = data["canvas"]
-
-        w = data["cw"]
-        h = data["ch"]
-
-        # <Configure> 事件未触发时回退到 winfo 获取实际尺寸
-        if w <= 1 or h <= 1:
-            w = canvas.winfo_width()
-            h = canvas.winfo_height()
-        if w <= 1 or h <= 1:
-            return
-
-        canvas.delete("all")
-
-        # 1. 提取当前主题全套高光色彩
-        is_up = change_val >= 0
-        theme_color = self.theme["up_color"] if is_up else self.theme["down_color"]
-        badge_bg = self.theme["up_badge_bg"] if is_up else self.theme["down_badge_bg"]
-        badge_border = self.theme["up_badge_border"] if is_up else self.theme["down_badge_border"]
-        chart_fill = self.theme["up_chart_fill"] if is_up else self.theme["down_chart_fill"]
-        bg_card = self.theme["bg_card"]
-        border_color = self.theme["border"]
-        inner_border = self.theme.get("inner_border", "#1E293B")
-        accent_color = self.theme.get("accent_color", "#FFE600")
-        price_color = self.price_flash.get(sym, self.theme["price_color"])
-        sym_color = self.theme["sym_color"]
-        grid_line = self.theme["grid_line"]
-        hud_tag = self.theme.get("hud_tag", "HUD//01")
-
-        # 2. 绘制科幻切角外框 (Chamfered Sci-Fi Frame)
-        chamfer = min(14, max(8, int(min(w, h) * 0.06)))
-        if self.theme.get("chamfer", True):
-            poly = [
-                3, 3 + chamfer,
-                3 + chamfer, 3,
-                w - 3 - chamfer, 3,
-                w - 3, 3 + chamfer,
-                w - 3, h - 3 - chamfer,
-                w - 3 - chamfer, h - 3,
-                3 + chamfer, h - 3,
-                3, h - 3 - chamfer
-            ]
-            canvas.create_polygon(poly, fill=bg_card, outline=border_color, width=2)
-            # 内发光微细边框
-            inner_poly = [
-                6, 6 + chamfer,
-                6 + chamfer, 6,
-                w - 6 - chamfer, 6,
-                w - 6, 6 + chamfer,
-                w - 6, h - 6 - chamfer,
-                w - 6 - chamfer, h - 6,
-                6 + chamfer, h - 6,
-                6, h - 6 - chamfer
-            ]
-            canvas.create_polygon(inner_poly, fill="", outline=inner_border, width=1)
-        else:
-            # 矩形终端风格
-            canvas.create_rectangle(3, 3, w - 3, h - 3, fill=bg_card, outline=border_color, width=2)
-            canvas.create_rectangle(6, 6, w - 6, h - 6, fill="", outline=inner_border, width=1)
-
-        # 3. 动态字号计算 (基于宽高极高容错)
-        sym_size = max(13, min(int(w * 0.075), int(h * 0.14), 22))
-        price_size = max(18, min(int(w * 0.115), int(h * 0.21), 32))
-        badge_size = max(11, min(int(w * 0.065), int(h * 0.12), 15))
-
-        # 舒适的顶部下沉间距 (避免贴顶，更显开阔)
-        y_header = max(20, int(h * 0.11))
-
-        # 顶部 HUD 序号指示槽
-        idx_str = f"#{index + 1:02d}"
-        idx_w = 26
-        idx_h = max(14, int(sym_size * 0.8))
-        idx_x1 = 12
-        idx_y1 = y_header - idx_h // 2
-        canvas.create_rectangle(idx_x1, idx_y1, idx_x1 + idx_w, idx_y1 + idx_h, fill=inner_border, outline=accent_color, width=1)
-        canvas.create_text(idx_x1 + idx_w // 2, y_header, text=idx_str, font=("Consolas", 8, "bold"), fill=accent_color, anchor="center")
-
-        # --- 第一行: 币种大名 + 实时状态脉冲点 + 纯净无框涨跌幅 ---
-        clean_sym = sym.replace("USDT", "")
-        t_sym = canvas.create_text(
-            idx_x1 + idx_w + 8, y_header, text=clean_sym,
-            font=("Microsoft YaHei UI", sym_size, "bold"), fill=sym_color, anchor="w"
-        )
-
-        # 准确测量币种文本右边界，彻底杜绝 LIVE 字样与币名重叠！
-        sym_bbox = canvas.bbox(t_sym)
-        dot_x = (sym_bbox[2] if sym_bbox else (idx_x1 + idx_w + 8 + len(clean_sym) * 14)) + 10
-
-        # 绿色/红色实时脉冲小圆点与 LIVE 字样
-        canvas.create_oval(dot_x - 3, y_header - 3, dot_x + 3, y_header + 3, fill=theme_color, outline="")
-        canvas.create_text(
-            dot_x + 6, y_header, text="LIVE",
-            font=("Consolas", max(7, int(sym_size * 0.42)), "bold"), fill=self.theme.get("muted", "#64748B"), anchor="w"
-        )
-
-        # 右侧：纯净无框涨跌幅文字 (去掉外框线与底框，保持干净高级)
-        arrow = "▲ " if is_up else "▼ "
-        badge_text = arrow + change_str.replace("+", "").replace("-", "")
-        canvas.create_text(
-            w - 14, y_header,
-            text=badge_text, font=("Consolas", badge_size, "bold"),
-            fill=theme_color, anchor="e"
-        )
-
-        # --- 第二行: 超大发光价格 + 24H High/Low 微型状态 ---
-        y_price = y_header + max(12, int(sym_size * 0.65)) + max(6, int(h * 0.03))
-        # 价格发光微重影背景 (Glow effect)
-        if self.theme.get("glow", True):
-            canvas.create_text(
-                12, y_price + 1, text=price_str,
-                font=("Consolas", price_size, "bold"), fill=bg_card, anchor="nw"
-            )
-        canvas.create_text(
-            12, y_price, text=price_str,
-            font=("Consolas", price_size, "bold"), fill=price_color, anchor="nw"
-        )
-
-        # 24H 极值 (右侧)
-        if high_str and low_str and w >= 180:
-            h_l_text = f"24H H:{high_str}  L:{low_str}"
-            canvas.create_text(
-                w - 14, y_price + int(price_size * 0.4),
-                text=h_l_text, font=("Consolas", 8),
-                fill=self.theme.get("muted", "#94A3B8"), anchor="ne"
-            )
-
-        # --- 第三行: 底部科幻折线图、阴影与网格 ---
-        approx_price_h = int(price_size * 1.25)
-        chart_top = y_price + approx_price_h + max(6, int(h * 0.03))
-        chart_bottom = h - max(16, int(h * 0.08))
-        chart_left = 12
-        chart_right = w - 12
-        chart_h = chart_bottom - chart_top
-        chart_w = chart_right - chart_left
-
-        if chart_h >= 14 and chart_w > 20:
-            # 绘制 3 道背景辅助水平参考线
-            for frac in (0.25, 0.5, 0.75):
-                gy = chart_top + frac * chart_h
-                canvas.create_line(chart_left, gy, chart_right, gy, fill=grid_line, width=1, dash=(3, 3))
-
-            canvas.create_line(chart_left, chart_bottom, chart_right, chart_bottom, fill=grid_line, width=1)
-
-        raw_klines = self.history_data.get(sym, [])
-        if raw_klines and chart_h >= 14 and chart_w > 20 and len(raw_klines) >= 2:
-            prices = [k["close"] if isinstance(k, dict) else float(k) for k in raw_klines]
-            volumes = [k.get("volume", 0.0) if isinstance(k, dict) else 0.0 for k in raw_klines]
-
-            min_p, max_p = min(prices), max(prices)
-            rng = max_p - min_p if max_p != min_p else 1
-            n = len(prices) - 1
-            pts = []
-            max_idx = prices.index(max_p)
-            min_idx = prices.index(min_p)
-
-            # 1. 计算折线图点集
-            for i, p in enumerate(prices):
-                curr_x = chart_left + (i / n) * chart_w
-                curr_y = (chart_bottom - 2) - ((p - min_p) / rng) * (chart_h - 6)
-                pts.extend([curr_x, curr_y])
-
-            # 2. 走势图半透明能量填充
-            poly_pts = [chart_left, chart_bottom] + pts + [chart_right, chart_bottom]
-            canvas.create_polygon(poly_pts, fill=chart_fill, outline="")
-
-            # 3. 绘制 24H 迷你成交量柱状图 (Volume Bars - 叠加在能量背景之上，鲜明可见)
-            max_v = max(volumes) if volumes and max(volumes) > 0 else 1
-            bar_w = max(3, int((chart_w / len(raw_klines)) * 0.7))
-            vol_h_max = max(6, int(chart_h * 0.32))
-            for i, k_item in enumerate(raw_klines):
-                if isinstance(k_item, dict):
-                    v_val = k_item.get("volume", 0.0)
-                    v_up = k_item.get("is_up", True)
-                    vx = chart_left + (i / n) * chart_w
-                    vh = max(2, int((v_val / max_v) * vol_h_max))
-                    vy1 = chart_bottom - vh
-                    vy2 = chart_bottom
-                    v_border = self.theme["up_color"] if v_up else self.theme["down_color"]
-                    v_fill = self.theme["up_badge_bg"] if v_up else self.theme["down_badge_bg"]
-                    canvas.create_rectangle(
-                        vx - bar_w / 2, vy1, vx + bar_w / 2, vy2,
-                        fill=v_fill, outline=v_border, width=1
-                    )
-
-            # 4. 霓虹发光衬底 (厚发光线)
-            canvas.create_line(pts, fill=badge_bg, width=5, smooth=True)
-
-            # 5. 亮色主折线
-            canvas.create_line(pts, fill=theme_color, width=2.5, smooth=True)
-
-            # 6. 极值标注点
-            p_max_x = chart_left + (max_idx / n) * chart_w
-            p_max_y = (chart_bottom - 2) - ((max_p - min_p) / rng) * (chart_h - 6)
-            p_max_fill = "#2563EB" if self.theme_name == "pure_white" else "#FFFFFF"
-            canvas.create_oval(p_max_x - 2, p_max_y - 2, p_max_x + 2, p_max_y + 2, fill=p_max_fill, outline="")
-
-            p_min_x = chart_left + (min_idx / n) * chart_w
-            p_min_y = (chart_bottom - 2) - ((min_p - min_p) / rng) * (chart_h - 6)
-            canvas.create_oval(p_min_x - 2, p_min_y - 2, p_min_x + 2, p_min_y + 2, fill="#64748B", outline="")
-
-            # 7. 最新点科幻脉冲光标
-            last_x, last_y = pts[-2], pts[-1]
-            pulse_ring_fill = ""
-            pulse_inner_fill = "#2563EB" if self.theme_name == "pure_white" else "#FFFFFF"
-            canvas.create_oval(last_x - 5, last_y - 5, last_x + 5, last_y + 5, fill=pulse_ring_fill, outline=theme_color, width=1.5)
-            canvas.create_oval(last_x - 3, last_y - 3, last_x + 3, last_y + 3, fill=theme_color, outline="")
-            canvas.create_oval(last_x - 1, last_y - 1, last_x + 1, last_y + 1, fill=pulse_inner_fill, outline="")
-
-        # 底部 HUD 科技水印
-        wm_color = self.theme.get("muted", "#94A3B8") if self.theme_name == "pure_white" else inner_border
-        canvas.create_text(
-            12, h - 8, text=hud_tag,
-            font=("Consolas", 7, "bold"), fill=wm_color, anchor="w"
-        )
-        canvas.create_text(
-            w - 12, h - 8, text="/// SEC-TRD",
-            font=("Consolas", 7, "bold"), fill=wm_color, anchor="e"
-        )
-
-    def draw_weather_bar(self):
+    def _rebuild_weather_static(self):
+        """重构天气栏静态图元，创建可复用 ID"""
         if not self.weather_enabled or not hasattr(self, "weather_canvas"):
             return
-        w = self.weather_canvas.winfo_width()
-        h = self.weather_canvas.winfo_height()
-        if w <= 1 or h <= 1:
-            w = self.width - 12
-            h = 34
-        if w <= 1:
-            return
-
-        self.weather_canvas.delete("all")
+        w = self.weather_w if self.weather_w > 1 else (self.width - 12)
+        h = self.weather_h if self.weather_h > 1 else 34
+        canvas = self.weather_canvas
+        canvas.delete("all")
+        self.weather_ids.clear()
 
         bg_card = self.theme["bg_card"]
         border_color = self.theme["border"]
@@ -580,177 +532,412 @@ class HyperCyberMonitor:
             2 + chamfer, h - 2,
             2, h - 2 - chamfer
         ]
-        self.weather_canvas.create_polygon(poly, fill=bg_card, outline=border_color, width=1.5)
+        canvas.create_polygon(poly, fill=bg_card, outline=border_color, width=1.5)
 
         y_center = h // 2
 
-        # 2. 左侧：地点标签
+        # 2. 地点标签
         loc_text = f"📍 {self.weather_location}"
-        t_loc = self.weather_canvas.create_text(
+        t_loc = canvas.create_text(
             12, y_center, text=loc_text,
             font=("Microsoft YaHei UI", 9, "bold"), fill=accent_color, anchor="w"
         )
-        loc_bbox = self.weather_canvas.bbox(t_loc)
+        loc_bbox = canvas.bbox(t_loc)
         next_x = (loc_bbox[2] if loc_bbox else 130) + 12
 
-        # 天气与温湿度
-        if self.weather_data:
-            desc = self.weather_data.get("desc", "晴")
-            temp = self.weather_data.get("temp", "--°C")
-            feels = self.weather_data.get("feels", "")
-            humidity = self.weather_data.get("humidity", "--%")
-            wind = self.weather_data.get("wind", "--")
-            t_range = self.weather_data.get("range", "")
+        # 天气描述 (如 阴天)
+        t_desc = canvas.create_text(
+            next_x, y_center, text="--",
+            font=("Microsoft YaHei UI", 9, "bold"), fill=sym_color, anchor="w"
+        )
+        self.weather_ids["desc"] = t_desc
+        next_x += 42
 
-            # 天气描述 (如 阴天)
-            t_desc = self.weather_canvas.create_text(
-                next_x, y_center, text=desc,
-                font=("Microsoft YaHei UI", 9, "bold"), fill=sym_color, anchor="w"
-            )
-            desc_bbox = self.weather_canvas.bbox(t_desc)
-            next_x = (desc_bbox[2] if desc_bbox else next_x + 40) + 12
+        # 温度
+        t_temp = canvas.create_text(
+            next_x, y_center, text="🌡️ --°C",
+            font=("Consolas", 10, "bold"), fill=price_color, anchor="w"
+        )
+        self.weather_ids["temp"] = t_temp
+        next_x += 65
 
-            # 温度
-            t_temp = self.weather_canvas.create_text(
-                next_x, y_center, text=f"🌡️ {temp}",
-                font=("Consolas", 10, "bold"), fill=price_color, anchor="w"
-            )
-            temp_bbox = self.weather_canvas.bbox(t_temp)
-            next_x = (temp_bbox[2] if temp_bbox else next_x + 55) + 6
+        # 湿度
+        t_hum = canvas.create_text(
+            next_x, y_center, text="💧 湿度 --%",
+            font=("Microsoft YaHei UI", 9), fill=sym_color, anchor="w"
+        )
+        self.weather_ids["humidity"] = t_hum
+        next_x += 75
 
-            if feels and w >= 550:
-                t_feels = self.weather_canvas.create_text(
-                    next_x, y_center, text=f"(体感 {feels})",
-                    font=("Microsoft YaHei UI", 8), fill=muted_color, anchor="w"
-                )
-                feels_bbox = self.weather_canvas.bbox(t_feels)
-                next_x = (feels_bbox[2] if feels_bbox else next_x + 65) + 10
+        # 情绪
+        t_fng = canvas.create_text(
+            next_x, y_center, text="",
+            font=("Microsoft YaHei UI", 9, "bold"), fill="#10B981", anchor="w"
+        )
+        self.weather_ids["fng"] = t_fng
+        next_x += 85
 
-            # 湿度
-            if w >= 440:
-                t_hum = self.weather_canvas.create_text(
-                    next_x, y_center, text=f"💧 湿度 {humidity}",
-                    font=("Microsoft YaHei UI", 9), fill=sym_color, anchor="w"
-                )
-                hum_bbox = self.weather_canvas.bbox(t_hum)
-                next_x = (hum_bbox[2] if hum_bbox else next_x + 65) + 12
+        # 硬件
+        t_hw = canvas.create_text(
+            next_x, y_center, text="💻 CPU:--% RAM:--%",
+            font=("Consolas", 9), fill=muted_color, anchor="w"
+        )
+        self.weather_ids["hw"] = t_hw
 
-        # 3. 中间区域：全市场情绪 + 电脑硬件监控
-        if self.fng_data and w >= 660:
-            fng_txt = f"😱 情绪 {self.fng_data['value']} {self.fng_data['text']}"
-            t_fng = self.weather_canvas.create_text(
-                next_x, y_center, text=fng_txt,
-                font=("Microsoft YaHei UI", 9, "bold"), fill=self.fng_data["color"], anchor="w"
-            )
-            fng_bbox = self.weather_canvas.bbox(t_fng)
-            next_x = (fng_bbox[2] if fng_bbox else next_x + 80) + 12
+        # 游戏模式 / 防卡顿状态标志
+        t_game = canvas.create_text(
+            w - 180, y_center, text="",
+            font=("Microsoft YaHei UI", 8, "bold"), fill="#F97316", anchor="e"
+        )
+        self.weather_ids["game_badge"] = t_game
 
-        if self.hw_data and w >= 780:
-            hw_txt = f"💻 CPU:{self.hw_data['cpu']} RAM:{self.hw_data['ram']}"
-            t_hw = self.weather_canvas.create_text(
-                next_x, y_center, text=hw_txt,
-                font=("Consolas", 9), fill=muted_color, anchor="w"
-            )
+        # 时钟
+        t_clock = canvas.create_text(
+            w - 28, y_center, text="--:--:--",
+            font=("Consolas", 9, "bold"), fill=sym_color, anchor="e"
+        )
+        self.weather_ids["clock"] = t_clock
 
-        # 4. 右侧区域：数字时钟 + 实时呼吸灯
+        # 状态小圆点
+        o_dot = canvas.create_oval(w - 18, y_center - 3, w - 12, y_center + 3, fill=up_color, outline="")
+        self.weather_ids["dot"] = o_dot
+
+    def draw_weather_bar(self):
+        """增量更新天气栏文字与状态（零画布销毁）"""
+        if not self.weather_enabled or not hasattr(self, "weather_canvas") or not self.weather_ids:
+            return
+        canvas = self.weather_canvas
+
+        # 1. 更新时钟
         now = datetime.now()
         weekdays = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
         weekday_str = weekdays[now.weekday()]
         clock_str = now.strftime(f"%H:%M:%S {weekday_str} %m-%d")
+        if "clock" in self.weather_ids:
+            canvas.itemconfigure(self.weather_ids["clock"], text=clock_str)
 
-        self.weather_canvas.create_text(
-            w - 28, y_center, text=clock_str,
-            font=("Consolas", 9, "bold"), fill=sym_color, anchor="e"
-        )
-        self.weather_canvas.create_oval(w - 18, y_center - 3, w - 12, y_center + 3, fill=up_color, outline="")
+        # 2. 更新天气与温湿度
+        if self.weather_data:
+            if "desc" in self.weather_ids:
+                canvas.itemconfigure(self.weather_ids["desc"], text=self.weather_data.get("desc", "晴"))
+            if "temp" in self.weather_ids:
+                canvas.itemconfigure(self.weather_ids["temp"], text=f"🌡️ {self.weather_data.get('temp', '--°C')}")
+            if "humidity" in self.weather_ids:
+                canvas.itemconfigure(self.weather_ids["humidity"], text=f"💧 湿度 {self.weather_data.get('humidity', '--%')}")
 
-    def _safe_after(self, ms, func):
-        try:
-            if hasattr(self, "root") and self.root.winfo_exists():
-                self.root.after(ms, func)
-        except Exception:
-            pass
+        # 3. 更新情绪
+        if self.fng_data and "fng" in self.weather_ids:
+            fng_txt = f"😱 情绪 {self.fng_data['value']} {self.fng_data['text']}"
+            canvas.itemconfigure(self.weather_ids["fng"], text=fng_txt, fill=self.fng_data.get("color", "#10B981"))
+
+        # 4. 更新硬件
+        if self.hw_data and "hw" in self.weather_ids:
+            hw_txt = f"💻 CPU:{self.hw_data['cpu']} RAM:{self.hw_data['ram']}"
+            canvas.itemconfigure(self.weather_ids["hw"], text=hw_txt)
+
+        # 5. 更新游戏模式指示
+        if "game_badge" in self.weather_ids:
+            if self.is_gaming:
+                canvas.itemconfigure(self.weather_ids["game_badge"], text="⚡ 游戏防掉帧")
+                canvas.itemconfigure(self.weather_ids["dot"], fill="#F97316")
+            else:
+                canvas.itemconfigure(self.weather_ids["game_badge"], text="")
+                canvas.itemconfigure(self.weather_ids["dot"], fill=self.theme.get("up_color", "#00FF9D"))
 
     def update_clock(self):
-        if self.weather_enabled and hasattr(self, "weather_canvas"):
-            self.draw_weather_bar()
-        self._safe_after(1000, self.update_clock)
+        """轻量级主线程秒表（仅修改文字，不触发重绘）"""
+        self.draw_weather_bar()
+        self.root.after(1000, self.update_clock)
 
-    def update_fng(self):
-        def _fetch():
-            data = fetch_fear_greed(self.proxies)
-            if data:
-                self.fng_data = data
-                self._safe_after(0, self.draw_weather_bar)
+    def on_gaming_status_changed(self, is_gaming):
+        """游戏状态切换响应"""
+        self.draw_weather_bar()
 
-        threading.Thread(target=_fetch, daemon=True).start()
-        self._safe_after(1800000, self.update_fng)
+    def apply_hardware_stats(self, stats):
+        self.hw_data = stats
+        self.draw_weather_bar()
 
-    def update_hardware(self):
-        def _fetch():
-            stats = get_hardware_stats()
-            self.hw_data = stats
-            self._safe_after(0, self.draw_weather_bar)
+    def apply_weather_data(self, data):
+        self.weather_data = data
+        self.draw_weather_bar()
 
-        threading.Thread(target=_fetch, daemon=True).start()
-        self._safe_after(2000, self.update_hardware)
+    def apply_fng_data(self, data):
+        self.fng_data = data
+        self.draw_weather_bar()
 
-    def update_weather(self):
-        if not self.weather_enabled:
+    def _init_card_canvas(self, sym, w, h):
+        """初始化卡片静态图元结构，建立可复用 ID 字典（仅在尺寸变化或启动时调用）"""
+        data = self.cards[sym]
+        canvas = data["canvas"]
+        canvas.delete("all")
+        ids = {}
+        data["ids"] = ids
+        data["initialized"] = True
+
+        if w <= 1 or h <= 1:
             return
 
-        def _fetch():
-            lat = self.weather_cfg.get("latitude", 28.13)
-            lon = self.weather_cfg.get("longitude", 112.95)
-            data = fetch_weather(lat, lon, self.proxies)
-            if data:
-                self.weather_data = data
-                self._safe_after(0, self.draw_weather_bar)
+        index = data["index"]
+        bg_card = self.theme["bg_card"]
+        border_color = self.theme["border"]
+        inner_border = self.theme.get("inner_border", "#1E293B")
+        accent_color = self.theme.get("accent_color", "#FFE600")
+        sym_color = self.theme["sym_color"]
+        grid_line = self.theme["grid_line"]
+        hud_tag = self.theme.get("hud_tag", "HUD//01")
 
-        threading.Thread(target=_fetch, daemon=True).start()
-        self._safe_after(self.weather_ms, self.update_weather)
+        # 1. 科幻切角外框
+        chamfer = min(14, max(8, int(min(w, h) * 0.06)))
+        if self.theme.get("chamfer", True):
+            poly = [
+                3, 3 + chamfer,
+                3 + chamfer, 3,
+                w - 3 - chamfer, 3,
+                w - 3, 3 + chamfer,
+                w - 3, h - 3 - chamfer,
+                w - 3 - chamfer, h - 3,
+                3 + chamfer, h - 3,
+                3, h - 3 - chamfer
+            ]
+            canvas.create_polygon(poly, fill=bg_card, outline=border_color, width=2)
+            inner_poly = [
+                6, 6 + chamfer,
+                6 + chamfer, 6,
+                w - 6 - chamfer, 6,
+                w - 6, 6 + chamfer,
+                w - 6, h - 6 - chamfer,
+                w - 6 - chamfer, h - 6,
+                6 + chamfer, h - 6,
+                6, h - 6 - chamfer
+            ]
+            canvas.create_polygon(inner_poly, fill="", outline=inner_border, width=1)
+        else:
+            canvas.create_rectangle(3, 3, w - 3, h - 3, fill=bg_card, outline=border_color, width=2)
+            canvas.create_rectangle(6, 6, w - 6, h - 6, fill="", outline=inner_border, width=1)
 
-    def get_klines(self, symbol):
-        for host in BINANCE_HOSTS:
-            try:
-                url = f"{host}/api/v3/klines?symbol={symbol}&interval={self.klines_interval}&limit={self.klines_limit}"
-                kwargs = {"timeout": 3, "headers": REQ_HEADERS}
-                if self.proxies:
-                    kwargs["proxies"] = self.proxies
-                res = requests.get(url, **kwargs).json()
-                if isinstance(res, list):
-                    return [
-                        {
-                            "close": float(k[4]),
-                            "volume": float(k[5]),
-                            "is_up": float(k[4]) >= float(k[1]),
-                        }
-                        for k in res
-                    ]
-            except Exception:
-                continue
-        logger.warning("K线数据请求失败: %s", symbol)
-        return []
+        # 2. 动态字号计算
+        sym_size = max(13, min(int(w * 0.075), int(h * 0.14), 22))
+        price_size = max(18, min(int(w * 0.115), int(h * 0.21), 32))
+        badge_size = max(11, min(int(w * 0.065), int(h * 0.12), 15))
 
-    def update_klines(self):
-        def _fetch_all():
-            results = {}
-            threads = []
-            for sym in self.symbols:
-                def _fetch(s=sym):
-                    results[s] = self.get_klines(s)
-                t = threading.Thread(target=_fetch, daemon=True)
-                t.start()
-                threads.append(t)
-            for t in threads:
-                t.join(timeout=5)
-            # 回到主线程更新数据
-            self._safe_after(0, lambda: self._apply_klines(results))
+        y_header = max(20, int(h * 0.11))
 
-        threading.Thread(target=_fetch_all, daemon=True).start()
-        self._safe_after(self.klines_ms, self.update_klines)
+        # 顶部 HUD 序号指示槽
+        idx_str = f"#{index + 1:02d}"
+        idx_w = 26
+        idx_h = max(14, int(sym_size * 0.8))
+        idx_x1 = 12
+        idx_y1 = y_header - idx_h // 2
+        canvas.create_rectangle(idx_x1, idx_y1, idx_x1 + idx_w, idx_y1 + idx_h, fill=inner_border, outline=accent_color, width=1)
+        canvas.create_text(idx_x1 + idx_w // 2, y_header, text=idx_str, font=("Consolas", 8, "bold"), fill=accent_color, anchor="center")
 
-    def _apply_klines(self, results):
+        # 第一行：币名、LIVE脉冲点、涨跌幅
+        clean_sym = sym.replace("USDT", "")
+        t_sym = canvas.create_text(
+            idx_x1 + idx_w + 8, y_header, text=clean_sym,
+            font=("Microsoft YaHei UI", sym_size, "bold"), fill=sym_color, anchor="w"
+        )
+        sym_bbox = canvas.bbox(t_sym)
+        dot_x = (sym_bbox[2] if sym_bbox else (idx_x1 + idx_w + 8 + len(clean_sym) * 14)) + 10
+
+        ids["live_dot"] = canvas.create_oval(dot_x - 3, y_header - 3, dot_x + 3, y_header + 3, fill=self.theme["up_color"], outline="")
+        canvas.create_text(
+            dot_x + 6, y_header, text="LIVE",
+            font=("Consolas", max(7, int(sym_size * 0.42)), "bold"), fill=self.theme.get("muted", "#64748B"), anchor="w"
+        )
+        ids["badge_text"] = canvas.create_text(
+            w - 14, y_header, text="+0.00%",
+            font=("Consolas", badge_size, "bold"), fill=self.theme["up_color"], anchor="e"
+        )
+
+        # 第二行：大字发光价格与 24H 极值
+        y_price = y_header + max(12, int(sym_size * 0.65)) + max(6, int(h * 0.03))
+        if self.theme.get("glow", True):
+            ids["price_glow"] = canvas.create_text(
+                12, y_price + 1, text="---",
+                font=("Consolas", price_size, "bold"), fill=bg_card, anchor="nw"
+            )
+        ids["price_text"] = canvas.create_text(
+            12, y_price, text="---",
+            font=("Consolas", price_size, "bold"), fill=self.theme["price_color"], anchor="nw"
+        )
+        ids["high_low_text"] = canvas.create_text(
+            w - 14, y_price + int(price_size * 0.4),
+            text="", font=("Consolas", 8),
+            fill=self.theme.get("muted", "#94A3B8"), anchor="ne"
+        )
+
+        # 第三行：底部背景辅助水平参考线
+        approx_price_h = int(price_size * 1.25)
+        chart_top = y_price + approx_price_h + max(6, int(h * 0.03))
+        chart_bottom = h - max(16, int(h * 0.08))
+        chart_left = 12
+        chart_right = w - 12
+        chart_h = chart_bottom - chart_top
+        chart_w = chart_right - chart_left
+
+        data["chart_geo"] = {
+            "top": chart_top, "bottom": chart_bottom,
+            "left": chart_left, "right": chart_right,
+            "h": chart_h, "w": chart_w
+        }
+
+        if chart_h >= 14 and chart_w > 20:
+            for frac in (0.25, 0.5, 0.75):
+                gy = chart_top + frac * chart_h
+                canvas.create_line(chart_left, gy, chart_right, gy, fill=grid_line, width=1, dash=(3, 3))
+            canvas.create_line(chart_left, chart_bottom, chart_right, chart_bottom, fill=grid_line, width=1)
+
+        # 动态图元骨架占位
+        ids["chart_poly"] = canvas.create_polygon(0, 0, 0, 0, 0, 0, fill="", outline="")
+        ids["volume_bars"] = []
+        # 预分配 25 个成交量矩形 ID
+        for _ in range(self.klines_limit):
+            v_id = canvas.create_rectangle(0, 0, 0, 0, fill="", outline="", width=1)
+            ids["volume_bars"].append(v_id)
+
+        ids["chart_glow"] = canvas.create_line(0, 0, 0, 0, fill="", width=5, smooth=True)
+        ids["chart_line"] = canvas.create_line(0, 0, 0, 0, fill="", width=2.5, smooth=True)
+        ids["max_dot"] = canvas.create_oval(-10, -10, -10, -10, fill="", outline="")
+        ids["min_dot"] = canvas.create_oval(-10, -10, -10, -10, fill="", outline="")
+        ids["pulse_ring"] = canvas.create_oval(-10, -10, -10, -10, fill="", outline="", width=1.5)
+        ids["pulse_dot"] = canvas.create_oval(-10, -10, -10, -10, fill="", outline="")
+        ids["pulse_inner"] = canvas.create_oval(-10, -10, -10, -10, fill="", outline="")
+
+        # 底部 HUD 科技水印
+        wm_color = self.theme.get("muted", "#94A3B8") if self.theme_name == "pure_white" else inner_border
+        canvas.create_text(12, h - 8, text=hud_tag, font=("Consolas", 7, "bold"), fill=wm_color, anchor="w")
+        canvas.create_text(w - 12, h - 8, text="/// SEC-TRD", font=("Consolas", 7, "bold"), fill=wm_color, anchor="e")
+
+    def _clear_flash(self, sym):
+        if sym in self.price_flash:
+            del self.price_flash[sym]
+            stats = self.realtime_stats.get(sym)
+            if stats and stats["price_str"]:
+                self.draw_card(
+                    sym, stats["price_str"], stats["change_str"], stats["change_val"],
+                    stats.get("high_str", ""), stats.get("low_str", ""), stats.get("index", 0)
+                )
+
+    def draw_card(self, sym, price_str, change_str, change_val, high_str="", low_str="", index=0):
+        """增量更新卡片图元（零画布销毁，超低 DWM 负载）"""
+        data = self.cards[sym]
+        if not data["initialized"] or not data["ids"]:
+            self._init_card_canvas(sym, data["cw"], data["ch"])
+        if not data["initialized"]:
+            return
+
+        canvas = data["canvas"]
+        ids = data["ids"]
+        geo = data.get("chart_geo", {})
+
+        is_up = change_val >= 0
+        theme_color = self.theme["up_color"] if is_up else self.theme["down_color"]
+        badge_bg = self.theme["up_badge_bg"] if is_up else self.theme["down_badge_bg"]
+        chart_fill = self.theme["up_chart_fill"] if is_up else self.theme["down_chart_fill"]
+
+        # 游戏模式下不使用呼吸高光颜色，防止高频 DWM 无效化
+        if self.is_gaming and self.pause_price_flash_in_game:
+            price_color = self.theme["price_color"]
+        else:
+            price_color = self.price_flash.get(sym, self.theme["price_color"])
+
+        # 1. 增量更新文本与状态指示
+        arrow = "▲ " if is_up else "▼ "
+        badge_text = arrow + change_str.replace("+", "").replace("-", "")
+        canvas.itemconfigure(ids["badge_text"], text=badge_text, fill=theme_color)
+        canvas.itemconfigure(ids["live_dot"], fill=theme_color)
+
+        canvas.itemconfigure(ids["price_text"], text=price_str, fill=price_color)
+        if "price_glow" in ids:
+            canvas.itemconfigure(ids["price_glow"], text=price_str)
+
+        if high_str and low_str and data["cw"] >= 180:
+            h_l_text = f"24H H:{high_str}  L:{low_str}"
+            canvas.itemconfigure(ids["high_low_text"], text=h_l_text)
+        else:
+            canvas.itemconfigure(ids["high_low_text"], text="")
+
+        # 2. 增量更新走势折线图与成交量柱
+        raw_klines = self.history_data.get(sym, [])
+        chart_h = geo.get("h", 0)
+        chart_w = geo.get("w", 0)
+        chart_top = geo.get("top", 0)
+        chart_bottom = geo.get("bottom", 0)
+        chart_left = geo.get("left", 0)
+        chart_right = geo.get("right", 0)
+
+        if raw_klines and chart_h >= 14 and chart_w > 20 and len(raw_klines) >= 2:
+            prices = [k["close"] if isinstance(k, dict) else float(k) for k in raw_klines]
+            volumes = [k.get("volume", 0.0) if isinstance(k, dict) else 0.0 for k in raw_klines]
+
+            min_p, max_p = min(prices), max(prices)
+            rng = max_p - min_p if max_p != min_p else 1
+            n = len(prices) - 1
+            pts = []
+            max_idx = prices.index(max_p)
+            min_idx = prices.index(min_p)
+
+            for i, p in enumerate(prices):
+                curr_x = chart_left + (i / n) * chart_w
+                curr_y = (chart_bottom - 2) - ((p - min_p) / rng) * (chart_h - 6)
+                pts.extend([curr_x, curr_y])
+
+            # 2.1 走势能量背景填充
+            poly_pts = [chart_left, chart_bottom] + pts + [chart_right, chart_bottom]
+            canvas.coords(ids["chart_poly"], *poly_pts)
+            canvas.itemconfigure(ids["chart_poly"], fill=chart_fill)
+
+            # 2.2 成交量柱状图
+            max_v = max(volumes) if volumes and max(volumes) > 0 else 1
+            bar_w = max(3, int((chart_w / len(raw_klines)) * 0.7))
+            vol_h_max = max(6, int(chart_h * 0.32))
+
+            for i, v_rect_id in enumerate(ids["volume_bars"]):
+                if i < len(raw_klines):
+                    k_item = raw_klines[i]
+                    v_val = k_item.get("volume", 0.0) if isinstance(k_item, dict) else 0.0
+                    v_up = k_item.get("is_up", True) if isinstance(k_item, dict) else True
+                    vx = chart_left + (i / n) * chart_w
+                    vh = max(2, int((v_val / max_v) * vol_h_max))
+                    vy1 = chart_bottom - vh
+                    vy2 = chart_bottom
+                    v_border = self.theme["up_color"] if v_up else self.theme["down_color"]
+                    v_fill = self.theme["up_badge_bg"] if v_up else self.theme["down_badge_bg"]
+                    canvas.coords(v_rect_id, vx - bar_w / 2, vy1, vx + bar_w / 2, vy2)
+                    canvas.itemconfigure(v_rect_id, fill=v_fill, outline=v_border)
+                else:
+                    canvas.coords(v_rect_id, 0, 0, 0, 0)
+
+            # 2.3 霓虹折线
+            canvas.coords(ids["chart_glow"], *pts)
+            canvas.itemconfigure(ids["chart_glow"], fill=badge_bg)
+            canvas.coords(ids["chart_line"], *pts)
+            canvas.itemconfigure(ids["chart_line"], fill=theme_color)
+
+            # 2.4 极值标注点
+            p_max_x = chart_left + (max_idx / n) * chart_w
+            p_max_y = (chart_bottom - 2) - ((max_p - min_p) / rng) * (chart_h - 6)
+            p_max_fill = "#2563EB" if self.theme_name == "pure_white" else "#FFFFFF"
+            canvas.coords(ids["max_dot"], p_max_x - 2, p_max_y - 2, p_max_x + 2, p_max_y + 2)
+            canvas.itemconfigure(ids["max_dot"], fill=p_max_fill)
+
+            p_min_x = chart_left + (min_idx / n) * chart_w
+            p_min_y = (chart_bottom - 2) - ((min_p - min_p) / rng) * (chart_h - 6)
+            canvas.coords(ids["min_dot"], p_min_x - 2, p_min_y - 2, p_min_x + 2, p_min_y + 2)
+            canvas.itemconfigure(ids["min_dot"], fill="#64748B")
+
+            # 2.5 最新点光标
+            last_x, last_y = pts[-2], pts[-1]
+            pulse_inner_fill = "#2563EB" if self.theme_name == "pure_white" else "#FFFFFF"
+            canvas.coords(ids["pulse_ring"], last_x - 5, last_y - 5, last_x + 5, last_y + 5)
+            canvas.itemconfigure(ids["pulse_ring"], outline=theme_color)
+            canvas.coords(ids["pulse_dot"], last_x - 3, last_y - 3, last_x + 3, last_y + 3)
+            canvas.itemconfigure(ids["pulse_dot"], fill=theme_color)
+            canvas.coords(ids["pulse_inner"], last_x - 1, last_y - 1, last_x + 1, last_y + 1)
+            canvas.itemconfigure(ids["pulse_inner"], fill=pulse_inner_fill)
+
+    def apply_klines_data(self, results):
         for sym, data in results.items():
             if data:
                 self.history_data[sym] = data
@@ -761,30 +948,7 @@ class HyperCyberMonitor:
                         stats.get("high_str", ""), stats.get("low_str", ""), stats.get("index", 0)
                     )
 
-    def update_realtime(self):
-        def _fetch_realtime():
-            stats = {}
-            symbols_json = json.dumps(self.symbols, separators=(',', ':'))
-            for host in BINANCE_HOSTS:
-                try:
-                    url = f"{host}/api/v3/ticker/24hr"
-                    kwargs = {"params": {"symbols": symbols_json}, "timeout": 3, "headers": REQ_HEADERS}
-                    if self.proxies:
-                        kwargs["proxies"] = self.proxies
-                    res = requests.get(url, **kwargs).json()
-                    if isinstance(res, list):
-                        stats = {item["symbol"]: item for item in res}
-                        break
-                except Exception:
-                    continue
-
-            # 回到主线程更新 UI
-            self._safe_after(0, lambda: self._apply_realtime(stats))
-
-        threading.Thread(target=_fetch_realtime, daemon=True).start()
-        self._safe_after(self.realtime_ms, self.update_realtime)
-
-    def _apply_realtime(self, stats):
+    def apply_realtime_stats(self, stats):
         for i, sym in enumerate(self.symbols):
             if sym in stats:
                 item = stats[sym]
@@ -811,17 +975,17 @@ class HyperCyberMonitor:
 
                 h_text = _fmt_hl(h_val) if h_val else ""
                 l_text = _fmt_hl(l_val) if l_val else ""
-
                 c_text = f"{change:+.2f}%"
 
-                # 价格呼吸闪烁微动效判断
-                old_p = self.prev_prices.get(sym)
-                if old_p is not None and old_p != price:
-                    if price > old_p:
-                        self.price_flash[sym] = self.theme["up_color"]
-                    else:
-                        self.price_flash[sym] = self.theme["down_color"]
-                    self.root.after(800, lambda s=sym: self._clear_flash(s))
+                # 价格呼吸闪烁微动效 (仅在非游戏模式且价格跳动时触发)
+                if not self.is_gaming:
+                    old_p = self.prev_prices.get(sym)
+                    if old_p is not None and old_p != price:
+                        if price > old_p:
+                            self.price_flash[sym] = self.theme["up_color"]
+                        else:
+                            self.price_flash[sym] = self.theme["down_color"]
+                        self.root.after(800, lambda s=sym: self._clear_flash(s))
                 self.prev_prices[sym] = price
 
                 self.realtime_stats[sym] = {
