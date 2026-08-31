@@ -483,13 +483,6 @@ class HyperCyberMonitor:
         except Exception:
             pass
 
-    def _on_weather_configure(self, event):
-        if event.width != self.weather_w or event.height != self.weather_h:
-            self.weather_w = event.width
-            self.weather_h = event.height
-            self._rebuild_weather_static()
-            self.draw_weather_bar()
-
     def _on_card_configure(self, event, card_data, sym):
         if event.width != card_data["cw"] or event.height != card_data["ch"] or not card_data["initialized"]:
             card_data["cw"] = event.width
@@ -502,15 +495,23 @@ class HyperCyberMonitor:
                     stats.get("high_str", ""), stats.get("low_str", ""), stats.get("index", 0)
                 )
 
-    def _rebuild_weather_static(self):
-        """重构天气栏静态图元，创建可复用 ID"""
+    def _on_weather_configure(self, event):
+        self.draw_weather_bar()
+
+    def draw_weather_bar(self):
+        """流式自适应排版天气状态栏（完全避免文字重叠，优雅适配任意屏幕宽度）"""
         if not self.weather_enabled or not hasattr(self, "weather_canvas"):
             return
-        w = self.weather_w if self.weather_w > 1 else (self.width - 12)
-        h = self.weather_h if self.weather_h > 1 else 34
+        w = self.weather_canvas.winfo_width()
+        h = self.weather_canvas.winfo_height()
+        if w <= 1 or h <= 1:
+            w = self.width - 12
+            h = 34
+        if w <= 1:
+            return
+
         canvas = self.weather_canvas
         canvas.delete("all")
-        self.weather_ids.clear()
 
         bg_card = self.theme["bg_card"]
         border_color = self.theme["border"]
@@ -536,7 +537,7 @@ class HyperCyberMonitor:
 
         y_center = h // 2
 
-        # 2. 地点标签
+        # 2. 左侧：地点标签
         loc_text = f"📍 {self.weather_location}"
         t_loc = canvas.create_text(
             12, y_center, text=loc_text,
@@ -545,104 +546,82 @@ class HyperCyberMonitor:
         loc_bbox = canvas.bbox(t_loc)
         next_x = (loc_bbox[2] if loc_bbox else 130) + 12
 
-        # 天气描述 (如 阴天)
-        t_desc = canvas.create_text(
-            next_x, y_center, text="--",
-            font=("Microsoft YaHei UI", 9, "bold"), fill=sym_color, anchor="w"
-        )
-        self.weather_ids["desc"] = t_desc
-        next_x += 42
+        # 天气与温湿度
+        if self.weather_data:
+            desc = self.weather_data.get("desc", "晴")
+            temp = self.weather_data.get("temp", "--°C")
+            feels = self.weather_data.get("feels", "")
+            humidity = self.weather_data.get("humidity", "--%")
 
-        # 温度
-        t_temp = canvas.create_text(
-            next_x, y_center, text="🌡️ --°C",
-            font=("Consolas", 10, "bold"), fill=price_color, anchor="w"
-        )
-        self.weather_ids["temp"] = t_temp
-        next_x += 65
+            # 天气描述 (如 阴天)
+            t_desc = canvas.create_text(
+                next_x, y_center, text=desc,
+                font=("Microsoft YaHei UI", 9, "bold"), fill=sym_color, anchor="w"
+            )
+            desc_bbox = canvas.bbox(t_desc)
+            next_x = (desc_bbox[2] if desc_bbox else next_x + 40) + 12
 
-        # 湿度
-        t_hum = canvas.create_text(
-            next_x, y_center, text="💧 湿度 --%",
-            font=("Microsoft YaHei UI", 9), fill=sym_color, anchor="w"
-        )
-        self.weather_ids["humidity"] = t_hum
-        next_x += 75
+            # 温度
+            t_temp = canvas.create_text(
+                next_x, y_center, text=f"🌡️ {temp}",
+                font=("Consolas", 10, "bold"), fill=price_color, anchor="w"
+            )
+            temp_bbox = canvas.bbox(t_temp)
+            next_x = (temp_bbox[2] if temp_bbox else next_x + 55) + 6
 
-        # 情绪
-        t_fng = canvas.create_text(
-            next_x, y_center, text="",
-            font=("Microsoft YaHei UI", 9, "bold"), fill="#10B981", anchor="w"
-        )
-        self.weather_ids["fng"] = t_fng
-        next_x += 85
+            if feels and w >= 550:
+                t_feels = canvas.create_text(
+                    next_x, y_center, text=f"(体感 {feels})",
+                    font=("Microsoft YaHei UI", 8), fill=muted_color, anchor="w"
+                )
+                feels_bbox = canvas.bbox(t_feels)
+                next_x = (feels_bbox[2] if feels_bbox else next_x + 65) + 10
 
-        # 硬件
-        t_hw = canvas.create_text(
-            next_x, y_center, text="💻 CPU:--% RAM:--%",
-            font=("Consolas", 9), fill=muted_color, anchor="w"
-        )
-        self.weather_ids["hw"] = t_hw
+            # 湿度
+            if w >= 440:
+                t_hum = canvas.create_text(
+                    next_x, y_center, text=f"💧 湿度 {humidity}",
+                    font=("Microsoft YaHei UI", 9), fill=sym_color, anchor="w"
+                )
+                hum_bbox = canvas.bbox(t_hum)
+                next_x = (hum_bbox[2] if hum_bbox else next_x + 65) + 12
 
-        # 游戏模式 / 防卡顿状态标志
-        t_game = canvas.create_text(
-            w - 180, y_center, text="",
-            font=("Microsoft YaHei UI", 8, "bold"), fill="#F97316", anchor="e"
-        )
-        self.weather_ids["game_badge"] = t_game
+        # 3. 中间区域：全市场情绪 + 电脑硬件监控
+        if self.fng_data and w >= 660:
+            fng_txt = f"😱 情绪 {self.fng_data['value']} {self.fng_data['text']}"
+            t_fng = canvas.create_text(
+                next_x, y_center, text=fng_txt,
+                font=("Microsoft YaHei UI", 9, "bold"), fill=self.fng_data.get("color", "#10B981"), anchor="w"
+            )
+            fng_bbox = canvas.bbox(t_fng)
+            next_x = (fng_bbox[2] if fng_bbox else next_x + 80) + 12
 
-        # 时钟
-        t_clock = canvas.create_text(
-            w - 28, y_center, text="--:--:--",
-            font=("Consolas", 9, "bold"), fill=sym_color, anchor="e"
-        )
-        self.weather_ids["clock"] = t_clock
+        if self.hw_data and w >= 760:
+            hw_txt = f"💻 CPU:{self.hw_data['cpu']} RAM:{self.hw_data['ram']}"
+            canvas.create_text(
+                next_x, y_center, text=hw_txt,
+                font=("Consolas", 9), fill=muted_color, anchor="w"
+            )
 
-        # 状态小圆点
-        o_dot = canvas.create_oval(w - 18, y_center - 3, w - 12, y_center + 3, fill=up_color, outline="")
-        self.weather_ids["dot"] = o_dot
-
-    def draw_weather_bar(self):
-        """增量更新天气栏文字与状态（零画布销毁）"""
-        if not self.weather_enabled or not hasattr(self, "weather_canvas") or not self.weather_ids:
-            return
-        canvas = self.weather_canvas
-
-        # 1. 更新时钟
+        # 4. 右侧区域：数字时钟 + 状态灯 (+ 游戏模式状态)
         now = datetime.now()
         weekdays = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
         weekday_str = weekdays[now.weekday()]
         clock_str = now.strftime(f"%H:%M:%S {weekday_str} %m-%d")
-        if "clock" in self.weather_ids:
-            canvas.itemconfigure(self.weather_ids["clock"], text=clock_str)
 
-        # 2. 更新天气与温湿度
-        if self.weather_data:
-            if "desc" in self.weather_ids:
-                canvas.itemconfigure(self.weather_ids["desc"], text=self.weather_data.get("desc", "晴"))
-            if "temp" in self.weather_ids:
-                canvas.itemconfigure(self.weather_ids["temp"], text=f"🌡️ {self.weather_data.get('temp', '--°C')}")
-            if "humidity" in self.weather_ids:
-                canvas.itemconfigure(self.weather_ids["humidity"], text=f"💧 湿度 {self.weather_data.get('humidity', '--%')}")
+        # 时钟
+        canvas.create_text(
+            w - 28, y_center, text=clock_str,
+            font=("Consolas", 9, "bold"), fill=sym_color, anchor="e"
+        )
+        dot_color = "#F97316" if self.is_gaming else up_color
+        canvas.create_oval(w - 18, y_center - 3, w - 12, y_center + 3, fill=dot_color, outline="")
 
-        # 3. 更新情绪
-        if self.fng_data and "fng" in self.weather_ids:
-            fng_txt = f"😱 情绪 {self.fng_data['value']} {self.fng_data['text']}"
-            canvas.itemconfigure(self.weather_ids["fng"], text=fng_txt, fill=self.fng_data.get("color", "#10B981"))
-
-        # 4. 更新硬件
-        if self.hw_data and "hw" in self.weather_ids:
-            hw_txt = f"💻 CPU:{self.hw_data['cpu']} RAM:{self.hw_data['ram']}"
-            canvas.itemconfigure(self.weather_ids["hw"], text=hw_txt)
-
-        # 5. 更新游戏模式指示
-        if "game_badge" in self.weather_ids:
-            if self.is_gaming:
-                canvas.itemconfigure(self.weather_ids["game_badge"], text="⚡ 游戏防掉帧")
-                canvas.itemconfigure(self.weather_ids["dot"], fill="#F97316")
-            else:
-                canvas.itemconfigure(self.weather_ids["game_badge"], text="")
-                canvas.itemconfigure(self.weather_ids["dot"], fill=self.theme.get("up_color", "#00FF9D"))
+        if self.is_gaming and w >= 560:
+            canvas.create_text(
+                w - 180, y_center, text="⚡ 游戏防掉帧",
+                font=("Microsoft YaHei UI", 8, "bold"), fill="#F97316", anchor="e"
+            )
 
     def update_clock(self):
         """轻量级主线程秒表（仅修改文字，不触发重绘）"""
@@ -669,13 +648,17 @@ class HyperCyberMonitor:
         """初始化卡片静态图元结构，建立可复用 ID 字典（仅在尺寸变化或启动时调用）"""
         data = self.cards[sym]
         canvas = data["canvas"]
+
+        if w <= 1 or h <= 1:
+            w = canvas.winfo_width()
+            h = canvas.winfo_height()
+        if w <= 1 or h <= 1:
+            return
+
         canvas.delete("all")
         ids = {}
         data["ids"] = ids
         data["initialized"] = True
-
-        if w <= 1 or h <= 1:
-            return
 
         index = data["index"]
         bg_card = self.theme["bg_card"]
@@ -824,7 +807,7 @@ class HyperCyberMonitor:
         data = self.cards[sym]
         if not data["initialized"] or not data["ids"]:
             self._init_card_canvas(sym, data["cw"], data["ch"])
-        if not data["initialized"]:
+        if not data["initialized"] or not data["ids"]:
             return
 
         canvas = data["canvas"]

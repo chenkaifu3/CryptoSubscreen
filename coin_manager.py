@@ -171,65 +171,63 @@ class CoinManager:
         self.status_var.set(text)
 
     def _build_ui(self):
-        tk.Label(
-            self.root, text="副屏仪表盘管理", bg=self.BG, fg=self.ACCENT,
-            font=("Microsoft YaHei UI", 14, "bold"),
-        ).pack(pady=(10, 6))
+        root_pad = tk.Frame(self.root, bg=self.BG)
+        root_pad.pack(fill="both", expand=True, padx=12, pady=10)
 
-        # --- 设备与风格设置 ---
-        sec = self._section(self.root, "显示设备与风格")
-
-        row = tk.Frame(sec, bg=self.CARD)
-        row.pack(fill="x", pady=2)
-        self._label(row, "选择显示器:").pack(side="left")
-        self.monitor_var = tk.StringVar()
-        names = []
-        for i, m in enumerate(self.monitors):
-            tag = " [主屏]" if m["primary"] else ""
-            names.append(f"显示器 {i + 1}{tag}  {m['width']}x{m['height']}")
-        self.monitor_combo = ttk.Combobox(
-            row, textvariable=self.monitor_var, values=names,
-            state="readonly", width=25,
+        # --- 屏幕硬件与坐标配置 ---
+        sec = tk.LabelFrame(
+            root_pad, text=" 屏幕与显示设置 ", bg=self.CARD, fg=self.ACCENT,
+            font=("Microsoft YaHei UI", 9, "bold"), bd=1, relief="solid", padx=10, pady=8
         )
-        self.monitor_combo.pack(side="right")
+        sec.pack(fill="x", pady=(0, 6))
+
+        # 显示器下拉选择
+        mon_row = tk.Frame(sec, bg=self.CARD)
+        mon_row.pack(fill="x", pady=(0, 4))
+        self._label(mon_row, "目标屏幕:").pack(side="left", padx=(0, 4))
+
+        mon_names = [f"[{i + 1}] {m['name']} ({m['width']}x{m['height']}) {'[主屏]' if m['primary'] else '[副屏]'}" for i, m in enumerate(self.monitors)]
+        self.monitor_combo = ttk.Combobox(
+            mon_row, values=mon_names, state="readonly", font=("Microsoft YaHei UI", 8), width=36
+        )
+        self.monitor_combo.pack(side="left", fill="x", expand=True, padx=(0, 4))
         self.monitor_combo.bind("<<ComboboxSelected>>", self._on_monitor_select)
 
-        # 手动修改坐标与尺寸区域
-        param_row = tk.Frame(sec, bg=self.CARD)
-        param_row.pack(fill="x", pady=(3, 2))
+        # 尺寸与坐标输入行
+        pos_row = tk.Frame(sec, bg=self.CARD)
+        pos_row.pack(fill="x", pady=(0, 4))
 
-        def _add_param_entry(parent, label_text, var):
-            f = tk.Frame(parent, bg=self.CARD)
-            f.pack(side="left", expand=True, fill="x", padx=1)
-            tk.Label(f, text=label_text, bg=self.CARD, fg=self.MUTED, font=("Microsoft YaHei UI", 8)).pack(side="left")
+        for label_text, var in [
+            ("宽:", self.width_var),
+            ("高:", self.height_var),
+            ("X:", self.x_var),
+            ("Y:", self.y_var),
+        ]:
+            self._label(pos_row, label_text).pack(side="left", padx=(0, 1))
             e = tk.Entry(
-                f, textvariable=var, bg="#1A1A1A", fg=self.TEXT,
-                insertbackground=self.TEXT, relief="flat", bd=0, width=6,
-                font=("Consolas", 9), justify="center"
+                pos_row, textvariable=var, width=5, bg="#1E1E1E", fg=self.TEXT,
+                insertbackground=self.TEXT, bd=0, relief="flat", font=("Consolas", 9)
             )
-            e.pack(side="left", padx=(2, 0))
+            e.pack(side="left", padx=(0, 4))
             e.bind("<FocusOut>", self._on_entry_edited)
             e.bind("<Return>", self._on_entry_edited)
-            e.bind("<KeyRelease>", self._on_entry_edited)
-            return e
 
-        _add_param_entry(param_row, "X:", self.x_var)
-        _add_param_entry(param_row, "Y:", self.y_var)
-        _add_param_entry(param_row, "宽:", self.width_var)
-        _add_param_entry(param_row, "高:", self.height_var)
-
-        # 快捷对齐与显示选项行
-        opt_row = tk.Frame(sec, bg=self.CARD)
-        opt_row.pack(fill="x", pady=(3, 2))
+        # 快捷对齐按钮行
+        align_row = tk.Frame(sec, bg=self.CARD)
+        align_row.pack(fill="x", pady=(2, 2))
 
         self._styled_btn(
-            opt_row, "主屏左侧齐平 (-W,0)", self._align_left_top, "accent_border",
-            font=("Microsoft YaHei UI", 8), side="left", padx=(0, 4)
-        )
-        self._styled_btn(
-            opt_row, "重置坐标", self._reset_to_detected_monitor, "muted",
+            align_row, "📐 主屏左侧齐平 (-W,0)", self._align_left_top, "accent_border",
             font=("Microsoft YaHei UI", 8), side="left", padx=(0, 6)
         )
+        self._styled_btn(
+            align_row, "🔄 重置为识别坐标", self._reset_to_detected_monitor, "muted",
+            font=("Microsoft YaHei UI", 8), side="left", padx=(0, 6)
+        )
+
+        # 显示属性复选框行
+        opt_row = tk.Frame(sec, bg=self.CARD)
+        opt_row.pack(fill="x", pady=(2, 2))
 
         self.topmost_var = tk.BooleanVar()
         self.borderless_var = tk.BooleanVar()
@@ -239,25 +237,25 @@ class CoinManager:
             bg=self.CARD, fg=self.TEXT, selectcolor="#1A1A1A",
             activebackground=self.CARD, font=("Microsoft YaHei UI", 8),
             bd=0, activeforeground=self.TEXT, command=self._auto_save
-        ).pack(side="left", padx=(2, 0))
+        ).pack(side="left", padx=(0, 8))
         tk.Checkbutton(
             opt_row, text="无边框", variable=self.borderless_var,
             bg=self.CARD, fg=self.TEXT, selectcolor="#1A1A1A",
             activebackground=self.CARD, font=("Microsoft YaHei UI", 8),
             bd=0, activeforeground=self.TEXT, command=self._auto_save
-        ).pack(side="left", padx=(2, 0))
+        ).pack(side="left", padx=(0, 8))
         tk.Checkbutton(
             opt_row, text="岳麓区天气", variable=self.weather_var,
             bg=self.CARD, fg=self.TEXT, selectcolor="#1A1A1A",
             activebackground=self.CARD, font=("Microsoft YaHei UI", 8),
             bd=0, activeforeground=self.TEXT, command=self._auto_save
-        ).pack(side="left", padx=(2, 0))
+        ).pack(side="left", padx=(0, 8))
         tk.Checkbutton(
             opt_row, text="游戏防卡顿", variable=self.gaming_var,
             bg=self.CARD, fg=self.TEXT, selectcolor="#1A1A1A",
             activebackground=self.CARD, font=("Microsoft YaHei UI", 8),
             bd=0, activeforeground=self.TEXT, command=self._auto_save
-        ).pack(side="left", padx=(2, 0))
+        ).pack(side="left", padx=(0, 8))
 
         # 主题风格色系切换行
         theme_row = tk.Frame(sec, bg=self.CARD)
