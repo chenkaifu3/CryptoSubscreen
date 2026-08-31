@@ -97,7 +97,7 @@ class CoinManager:
 
         self.root = tk.Tk()
         self.root.title("副屏显示管理")
-        self.root.geometry("550x545")
+        self.root.geometry("580x640")
         self.root.configure(bg=self.BG)
         self.root.resizable(False, False)
 
@@ -124,13 +124,12 @@ class CoinManager:
         )
 
     def _section(self, parent, title):
-        frame = tk.Frame(parent, bg=self.CARD, padx=14, pady=8)
-        frame.pack(fill="x", padx=14, pady=(0, 8))
-        tk.Label(
-            frame, text=title, bg=self.CARD, fg=self.ACCENT,
-            font=("Microsoft YaHei UI", 10, "bold"), anchor="w",
-        ).pack(fill="x", pady=(0, 4))
-        return frame
+        sec = tk.LabelFrame(
+            parent, text=f" {title} ", bg=self.CARD, fg=self.ACCENT,
+            font=("Microsoft YaHei UI", 9, "bold"), bd=1, relief="solid", padx=12, pady=8
+        )
+        sec.pack(fill="x", pady=(0, 8))
+        return sec
 
     def _style_button(self, btn, normal_bg, hover_bg, normal_fg, hover_fg):
         btn.config(bg=normal_bg, fg=normal_fg, activebackground=hover_bg, activeforeground=hover_fg)
@@ -145,7 +144,8 @@ class CoinManager:
             btn.config(font=("Microsoft YaHei UI", 8))
             
         self._apply_btn_style(btn, style_type)
-        btn.pack(**pack_opts)
+        if pack_opts:
+            btn.pack(**pack_opts)
         return btn
 
     def _apply_btn_style(self, btn, style_type):
@@ -160,7 +160,7 @@ class CoinManager:
         elif style_type == "danger":
             self._style_button(btn, "#1A1A1A", self.RED, self.TEXT, "#000000")
         elif style_type == "accent_border":
-            self._style_button(btn, "#1A1A1A", "#2A2A2A", self.ACCENT, self.ACCENT)
+            self._style_button(btn, "#1A2333", "#223047", self.ACCENT, self.ACCENT)
         else: # normal
             self._style_button(btn, "#1A1A1A", "#2A2A2A", self.TEXT, self.TEXT)
 
@@ -171,31 +171,29 @@ class CoinManager:
         self.status_var.set(text)
 
     def _build_ui(self):
-        root_pad = tk.Frame(self.root, bg=self.BG)
-        root_pad.pack(fill="both", expand=True, padx=12, pady=10)
+        root_pad = tk.Frame(self.root, bg=self.BG, padx=14, pady=10)
+        root_pad.pack(fill="both", expand=True)
 
-        # --- 屏幕硬件与坐标配置 ---
-        sec = tk.LabelFrame(
-            root_pad, text=" 屏幕与显示设置 ", bg=self.CARD, fg=self.ACCENT,
-            font=("Microsoft YaHei UI", 9, "bold"), bd=1, relief="solid", padx=10, pady=8
-        )
-        sec.pack(fill="x", pady=(0, 6))
+        # ==========================================
+        # 1. 屏幕与显示设置
+        # ==========================================
+        sec1 = self._section(root_pad, "🖥️ 屏幕硬件与显示设置")
 
-        # 显示器下拉选择
-        mon_row = tk.Frame(sec, bg=self.CARD)
+        # 目标屏幕下拉选择
+        mon_row = tk.Frame(sec1, bg=self.CARD)
         mon_row.pack(fill="x", pady=(0, 4))
         self._label(mon_row, "目标屏幕:").pack(side="left", padx=(0, 4))
 
         mon_names = [f"[{i + 1}] {m['name']} ({m['width']}x{m['height']}) {'[主屏]' if m['primary'] else '[副屏]'}" for i, m in enumerate(self.monitors)]
         self.monitor_combo = ttk.Combobox(
-            mon_row, values=mon_names, state="readonly", font=("Microsoft YaHei UI", 8), width=36
+            mon_row, values=mon_names, state="readonly", font=("Microsoft YaHei UI", 8), width=38
         )
-        self.monitor_combo.pack(side="left", fill="x", expand=True, padx=(0, 4))
+        self.monitor_combo.pack(side="left", fill="x", expand=True, padx=(0, 2))
         self.monitor_combo.bind("<<ComboboxSelected>>", self._on_monitor_select)
 
         # 尺寸与坐标输入行
-        pos_row = tk.Frame(sec, bg=self.CARD)
-        pos_row.pack(fill="x", pady=(0, 4))
+        pos_row = tk.Frame(sec1, bg=self.CARD)
+        pos_row.pack(fill="x", pady=(2, 4))
 
         for label_text, var in [
             ("宽:", self.width_var),
@@ -203,77 +201,84 @@ class CoinManager:
             ("X:", self.x_var),
             ("Y:", self.y_var),
         ]:
-            self._label(pos_row, label_text).pack(side="left", padx=(0, 1))
+            self._label(pos_row, label_text).pack(side="left", padx=(0, 2))
             e = tk.Entry(
                 pos_row, textvariable=var, width=5, bg="#1E1E1E", fg=self.TEXT,
-                insertbackground=self.TEXT, bd=0, relief="flat", font=("Consolas", 9)
+                insertbackground=self.TEXT, bd=0, relief="flat", font=("Consolas", 9), justify="center"
             )
-            e.pack(side="left", padx=(0, 4))
+            e.pack(side="left", padx=(0, 8), ipady=1)
             e.bind("<FocusOut>", self._on_entry_edited)
             e.bind("<Return>", self._on_entry_edited)
 
         # 快捷对齐按钮行
-        align_row = tk.Frame(sec, bg=self.CARD)
-        align_row.pack(fill="x", pady=(2, 2))
+        align_row = tk.Frame(sec1, bg=self.CARD)
+        align_row.pack(fill="x", pady=(2, 3))
 
         self._styled_btn(
             align_row, "📐 主屏左侧齐平 (-W,0)", self._align_left_top, "accent_border",
-            font=("Microsoft YaHei UI", 8), side="left", padx=(0, 6)
+            font=("Microsoft YaHei UI", 8), side="left", padx=(0, 8)
         )
         self._styled_btn(
             align_row, "🔄 重置为识别坐标", self._reset_to_detected_monitor, "muted",
-            font=("Microsoft YaHei UI", 8), side="left", padx=(0, 6)
+            font=("Microsoft YaHei UI", 8), side="left", padx=(0, 8)
         )
 
         # 显示属性复选框行
-        opt_row = tk.Frame(sec, bg=self.CARD)
-        opt_row.pack(fill="x", pady=(2, 2))
+        opt_row = tk.Frame(sec1, bg=self.CARD)
+        opt_row.pack(fill="x", pady=(2, 4))
 
         self.topmost_var = tk.BooleanVar()
         self.borderless_var = tk.BooleanVar()
 
         tk.Checkbutton(
-            opt_row, text="置顶", variable=self.topmost_var,
+            opt_row, text="窗口置顶", variable=self.topmost_var,
             bg=self.CARD, fg=self.TEXT, selectcolor="#1A1A1A",
             activebackground=self.CARD, font=("Microsoft YaHei UI", 8),
             bd=0, activeforeground=self.TEXT, command=self._auto_save
-        ).pack(side="left", padx=(0, 8))
+        ).pack(side="left", padx=(0, 12))
         tk.Checkbutton(
-            opt_row, text="无边框", variable=self.borderless_var,
+            opt_row, text="无边框模式", variable=self.borderless_var,
             bg=self.CARD, fg=self.TEXT, selectcolor="#1A1A1A",
             activebackground=self.CARD, font=("Microsoft YaHei UI", 8),
             bd=0, activeforeground=self.TEXT, command=self._auto_save
-        ).pack(side="left", padx=(0, 8))
+        ).pack(side="left", padx=(0, 12))
         tk.Checkbutton(
-            opt_row, text="岳麓区天气", variable=self.weather_var,
+            opt_row, text="岳麓区气象", variable=self.weather_var,
             bg=self.CARD, fg=self.TEXT, selectcolor="#1A1A1A",
             activebackground=self.CARD, font=("Microsoft YaHei UI", 8),
             bd=0, activeforeground=self.TEXT, command=self._auto_save
-        ).pack(side="left", padx=(0, 8))
+        ).pack(side="left", padx=(0, 12))
         tk.Checkbutton(
             opt_row, text="游戏防卡顿", variable=self.gaming_var,
             bg=self.CARD, fg=self.TEXT, selectcolor="#1A1A1A",
             activebackground=self.CARD, font=("Microsoft YaHei UI", 8),
             bd=0, activeforeground=self.TEXT, command=self._auto_save
-        ).pack(side="left", padx=(0, 8))
+        ).pack(side="left", padx=(0, 12))
 
-        # 主题风格色系切换行
-        theme_row = tk.Frame(sec, bg=self.CARD)
-        theme_row.pack(fill="x", pady=(4, 2))
-        self._label(theme_row, "风格色系:").pack(side="left", padx=(0, 4))
+        # 主题风格色系切换（优雅 2x3 网格排版，每个按钮 170px 宽，绝不截断）
+        theme_sec = tk.Frame(sec1, bg=self.CARD)
+        theme_sec.pack(fill="x", pady=(3, 2))
+        self._label(theme_sec, "风格色系:").pack(side="top", anchor="w", pady=(0, 3))
 
-        theme_box = tk.Frame(theme_row, bg=self.CARD)
-        theme_box.pack(side="left", fill="x", expand=True)
+        theme_grid = tk.Frame(theme_sec, bg=self.CARD)
+        theme_grid.pack(fill="x")
 
-        for key, t_info in THEMES.items():
+        theme_keys = list(THEMES.keys())
+        for idx, key in enumerate(theme_keys):
+            r, c = divmod(idx, 3)
+            t_info = THEMES[key]
             btn = self._styled_btn(
-                theme_box, t_info["name"], lambda k=key: self._on_select_theme(k), "muted",
-                font=("Microsoft YaHei UI", 8), side="left", fill="x", expand=True, padx=1
+                theme_grid, t_info["name"], lambda k=key: self._on_select_theme(k), "muted",
+                font=("Microsoft YaHei UI", 8, "bold")
             )
+            btn.grid(row=r, column=c, sticky="nsew", padx=2, pady=2)
+            theme_grid.grid_columnconfigure(c, weight=1)
             self.theme_btns[key] = btn
 
-        # --- 监控币种配置 ---
-        sec2 = self._section(self.root, "监控币种配置 (自定义与模版)")
+        # ==========================================
+        # 2. 监控币种配置
+        # ==========================================
+        sec2 = self._section(root_pad, "🪙 监控币种配置 (自定义与模版)")
 
         # 自定义输入行
         custom_row = tk.Frame(sec2, bg=self.CARD)
@@ -281,14 +286,14 @@ class CoinManager:
         self._label(custom_row, "币种列表:").pack(side="left", padx=(0, 4))
 
         self.symbol_entry = tk.Entry(
-            custom_row, textvariable=self.symbols_var, bg="#1A1A1A", fg=self.TEXT,
+            custom_row, textvariable=self.symbols_var, bg="#1E1E1E", fg=self.TEXT,
             insertbackground=self.TEXT, relief="flat", bd=0, font=("Consolas", 9)
         )
-        self.symbol_entry.pack(side="left", fill="x", expand=True, padx=(0, 6), ipady=2)
+        self.symbol_entry.pack(side="left", fill="x", expand=True, padx=(0, 6), ipady=3)
         self.symbol_entry.bind("<Return>", lambda e: self._apply_custom_symbols())
 
         self._styled_btn(
-            custom_row, "应用", self._apply_custom_symbols, "accent",
+            custom_row, "💾 应用", self._apply_custom_symbols, "accent",
             font=("Microsoft YaHei UI", 8, "bold"), side="right"
         )
 
@@ -309,48 +314,50 @@ class CoinManager:
         presets_row.pack(fill="x", pady=(2, 2))
 
         self._styled_btn(
-            presets_row, "主流四大", lambda: self._apply_preset_and_restart(["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT"]), "accent_border",
+            presets_row, "🚀 主流四大", lambda: self._apply_preset_and_restart(["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT"]), "accent_border",
             font=("Microsoft YaHei UI", 8), side="left", fill="x", expand=True, padx=2
         )
         self._styled_btn(
-            presets_row, "热门公链", lambda: self._apply_preset_and_restart(["BTCUSDT", "ETHUSDT", "SOLUSDT", "SUIUSDT"]), "accent_border",
+            presets_row, "⛓️ 热门公链", lambda: self._apply_preset_and_restart(["BTCUSDT", "ETHUSDT", "SOLUSDT", "SUIUSDT"]), "accent_border",
             font=("Microsoft YaHei UI", 8), side="left", fill="x", expand=True, padx=2
         )
         self._styled_btn(
-            presets_row, "Meme板块", lambda: self._apply_preset_and_restart(["DOGEUSDT", "SHIBUSDT", "PEPEUSDT", "FLOKIUSDT"]), "accent_border",
+            presets_row, "🐶 Meme板块", lambda: self._apply_preset_and_restart(["DOGEUSDT", "SHIBUSDT", "PEPEUSDT", "FLOKIUSDT"]), "accent_border",
             font=("Microsoft YaHei UI", 8), side="left", fill="x", expand=True, padx=2
         )
         self._styled_btn(
-            presets_row, "DeFi金融", lambda: self._apply_preset_and_restart(["UNIUSDT", "AAVEUSDT", "LINKUSDT", "MKRUSDT"]), "accent_border",
+            presets_row, "🏦 DeFi金融", lambda: self._apply_preset_and_restart(["UNIUSDT", "AAVEUSDT", "LINKUSDT", "MKRUSDT"]), "accent_border",
             font=("Microsoft YaHei UI", 8), side="left", fill="x", expand=True, padx=2
         )
 
-        # --- 底部操作 ---
-        action = tk.Frame(self.root, bg=self.BG)
-        action.pack(fill="x", padx=14, pady=(8, 4))
+        # ==========================================
+        # 3. 底部操作栏
+        # ==========================================
+        action = tk.Frame(root_pad, bg=self.BG)
+        action.pack(fill="x", pady=(4, 2))
 
         btn_box = tk.Frame(action, bg=self.BG)
         btn_box.pack(fill="x")
 
         self.launch_btn = tk.Button(
-            btn_box, text="启动副屏", command=self._toggle_monitor,
+            btn_box, text="⚡ 启动副屏", command=self._toggle_monitor,
             relief="flat", bd=0, padx=16, pady=7,
             font=("Microsoft YaHei UI", 11, "bold"),
         )
-        self.launch_btn.pack(side="left", fill="x", expand=True, padx=(0, 6))
+        self.launch_btn.pack(side="left", fill="x", expand=True, padx=(0, 8))
         self._apply_btn_style(self.launch_btn, "green")
 
         self.mate_btn = tk.Button(
             btn_box, text="🐾 启动桌宠", command=self._launch_digital_mate,
-            relief="flat", bd=0, padx=12, pady=7,
+            relief="flat", bd=0, padx=14, pady=7,
             font=("Microsoft YaHei UI", 9, "bold"),
         )
-        self.mate_btn.pack(side="left", padx=(0, 6))
+        self.mate_btn.pack(side="left", padx=(0, 8))
         self._apply_btn_style(self.mate_btn, "accent_border")
 
         self.hide_btn = tk.Button(
-            btn_box, text="最小化到托盘", command=self._hide_to_tray,
-            relief="flat", bd=0, padx=12, pady=7,
+            btn_box, text="👁️ 隐藏到托盘", command=self._hide_to_tray,
+            relief="flat", bd=0, padx=14, pady=7,
             font=("Microsoft YaHei UI", 9),
         )
         self.hide_btn.pack(side="right")
@@ -358,10 +365,10 @@ class CoinManager:
 
         self.status_var = tk.StringVar(value="就绪")
         self.status_label = tk.Label(
-            self.root, textvariable=self.status_var, bg=self.BG, fg=self.MUTED,
+            root_pad, textvariable=self.status_var, bg=self.BG, fg=self.MUTED,
             font=("Microsoft YaHei UI", 9),
         )
-        self.status_label.pack(pady=(2, 6))
+        self.status_label.pack(pady=(4, 0))
 
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
