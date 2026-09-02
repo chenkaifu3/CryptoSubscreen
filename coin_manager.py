@@ -112,7 +112,7 @@ class CoinManager:
 
         self.root = tk.Tk()
         self.root.title("副屏显示管理")
-        self.root.geometry("580x730")
+        self.root.geometry("600x750")
         self.root.configure(bg=self.BG)
         self.root.resizable(False, False)
 
@@ -291,43 +291,50 @@ class CoinManager:
             font=("Microsoft YaHei UI", 8), side="left", fill="x", expand=True, padx=2
         )
 
-        # 显示属性复选框行
-        opt_row = tk.Frame(sec1, bg=self.CARD)
-        opt_row.pack(fill="x", pady=(2, 4))
+        # 显示属性复选框（分两行宽裕排版，彻底避免高DPI或增删选项导致的截断）
+        opt_box = tk.Frame(sec1, bg=self.CARD)
+        opt_box.pack(fill="x", pady=(2, 4))
+
+        opt_row1 = tk.Frame(opt_box, bg=self.CARD)
+        opt_row1.pack(fill="x", pady=(0, 2))
 
         self.topmost_var = tk.BooleanVar()
         self.borderless_var = tk.BooleanVar()
 
         tk.Checkbutton(
-            opt_row, text="窗口置顶", variable=self.topmost_var,
+            opt_row1, text="窗口置顶", variable=self.topmost_var,
             bg=self.CARD, fg=self.TEXT, selectcolor="#1A1A1A",
             activebackground=self.CARD, font=("Microsoft YaHei UI", 8),
             bd=0, activeforeground=self.TEXT, command=self._auto_save
-        ).pack(side="left", padx=(0, 12))
+        ).pack(side="left", padx=(0, 18))
         tk.Checkbutton(
-            opt_row, text="无边框模式", variable=self.borderless_var,
+            opt_row1, text="无边框模式", variable=self.borderless_var,
             bg=self.CARD, fg=self.TEXT, selectcolor="#1A1A1A",
             activebackground=self.CARD, font=("Microsoft YaHei UI", 8),
             bd=0, activeforeground=self.TEXT, command=self._auto_save
-        ).pack(side="left", padx=(0, 12))
+        ).pack(side="left", padx=(0, 18))
         tk.Checkbutton(
-            opt_row, text="岳麓区气象", variable=self.weather_var,
-            bg=self.CARD, fg=self.TEXT, selectcolor="#1A1A1A",
-            activebackground=self.CARD, font=("Microsoft YaHei UI", 8),
-            bd=0, activeforeground=self.TEXT, command=self._auto_save
-        ).pack(side="left", padx=(0, 12))
-        tk.Checkbutton(
-            opt_row, text="游戏防卡顿", variable=self.gaming_var,
-            bg=self.CARD, fg=self.TEXT, selectcolor="#1A1A1A",
-            activebackground=self.CARD, font=("Microsoft YaHei UI", 8),
-            bd=0, activeforeground=self.TEXT, command=self._auto_save
-        ).pack(side="left", padx=(0, 10))
-        tk.Checkbutton(
-            opt_row, text="联动分屏吸附", variable=self.snap_other_windows_var,
+            opt_row1, text="联动分屏吸附", variable=self.snap_other_windows_var,
             bg=self.CARD, fg=self.TEXT, selectcolor="#1A1A1A",
             activebackground=self.CARD, font=("Microsoft YaHei UI", 8),
             bd=0, activeforeground=self.TEXT
-        ).pack(side="left", padx=(0, 10))
+        ).pack(side="left", padx=(0, 18))
+
+        opt_row2 = tk.Frame(opt_box, bg=self.CARD)
+        opt_row2.pack(fill="x", pady=(1, 0))
+
+        tk.Checkbutton(
+            opt_row2, text="岳麓区气象", variable=self.weather_var,
+            bg=self.CARD, fg=self.TEXT, selectcolor="#1A1A1A",
+            activebackground=self.CARD, font=("Microsoft YaHei UI", 8),
+            bd=0, activeforeground=self.TEXT, command=self._auto_save
+        ).pack(side="left", padx=(0, 18))
+        tk.Checkbutton(
+            opt_row2, text="游戏防卡顿保护", variable=self.gaming_var,
+            bg=self.CARD, fg=self.TEXT, selectcolor="#1A1A1A",
+            activebackground=self.CARD, font=("Microsoft YaHei UI", 8),
+            bd=0, activeforeground=self.TEXT, command=self._auto_save
+        ).pack(side="left", padx=(0, 18))
 
         # 主题风格色系切换（优雅 2x3 网格排版，每个按钮 170px 宽，绝不截断）
         theme_sec = tk.Frame(sec1, bg=self.CARD)
@@ -440,9 +447,9 @@ class CoinManager:
         self.status_var = tk.StringVar(value="就绪")
         self.status_label = tk.Label(
             root_pad, textvariable=self.status_var, bg=self.BG, fg=self.MUTED,
-            font=("Microsoft YaHei UI", 9),
+            font=("Microsoft YaHei UI", 9), wraplength=560, justify="center"
         )
-        self.status_label.pack(pady=(4, 0))
+        self.status_label.pack(pady=(4, 0), fill="x")
 
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
