@@ -2,6 +2,7 @@ import copy
 import ctypes
 import json
 import os
+import queue
 import subprocess
 import sys
 import threading
@@ -112,7 +113,7 @@ class CoinManager:
 
         self.root = tk.Tk()
         self.root.title("副屏显示管理")
-        self.root.geometry("600x750")
+        self.root.geometry("600x780")
         self.root.configure(bg=self.BG)
         self.root.resizable(False, False)
 
@@ -127,11 +128,13 @@ class CoinManager:
         self.gaming_var = tk.BooleanVar(value=self.cfg.get("gaming_mode", {}).get("enabled", True))
         self.snap_other_windows_var = tk.BooleanVar(value=True)
         self.theme_btns = {}
+        self.icon_queue = queue.Queue()
 
         self._build_ui()
         self._load_to_ui()
         self._init_tray()
         self.root.bind("<Unmap>", self._on_unmap)
+        self._poll_icon_queue()
 
     def _label(self, parent, text, **kw):
         return tk.Label(
@@ -278,6 +281,19 @@ class CoinManager:
         )
         self.tile_mode_combo.current(0)
         self.tile_mode_combo.pack(side="left", fill="x", expand=True, padx=(0, 2))
+
+        # 桌面图标归拢工具（解决插拔/重排副屏导致的桌面图标跨屏漂移散落问题）
+        icon_tool_row = tk.Frame(sec1, bg=self.CARD)
+        icon_tool_row.pack(fill="x", pady=(2, 2))
+        self._label(icon_tool_row, "桌面图标:").pack(side="left", padx=(0, 4))
+        self._styled_btn(
+            icon_tool_row, "🖥️ 全部归拢到主屏", self._gather_icons_to_primary, "accent_border",
+            font=("Microsoft YaHei UI", 8), side="left", fill="x", expand=True, padx=2
+        )
+        self._styled_btn(
+            icon_tool_row, "📱 全部归拢到副屏", self._gather_icons_to_secondary, "muted",
+            font=("Microsoft YaHei UI", 8), side="left", fill="x", expand=True, padx=2
+        )
 
         align_row = tk.Frame(sec1, bg=self.CARD)
         align_row.pack(fill="x", pady=(2, 3))
@@ -934,6 +950,130 @@ class CoinManager:
             arranged_titles.append(title[:8])
 
         self._set_status(f"副屏应用已按 [{desc_text}] 整屏排布: {', '.join(arranged_titles)}", self.GREEN)
+
+    def _poll_icon_queue(self):
+        """定期从后台队列取出图标归拢结果，保证 Tkinter 线程安全"""
+        try:
+            while True:
+                success, cnt, target_name = self.icon_queue.get_nowait()
+                if success:
+                    self._set_status(f"已将全部 {cnt} 个桌面图标整齐归拢至{target_name}！", self.GREEN)
+                else:
+                    self._set_status("归拢图标失败，未检测到系统桌面视图", self.RED)
+        except queue.Empty:
+            pass
+        self.root.after(100, self._poll_icon_queue)
+
+    def _gather_icons_to_primary(self):
+        """将全部桌面图标整齐归拢到主屏（后台线程执行，确保 Win32 Desktop 权限且不卡顿界面）"""
+        pri_m = next((m for m in self.monitors if m.get("primary")), self.monitors[0])
+        self._set_status("正在归拢桌面图标到主屏...", self.MUTED)
+
+        def worker():
+            cnt, success = self._gather_desktop_icons_to_monitor(pri_m)
+            self.icon_queue.put((success, cnt, "主屏"))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _gather_icons_to_secondary(self):
+        """将全部桌面图标整齐归拢到副屏（后台线程执行，确保 Win32 Desktop 权限且不卡顿界面）"""
+        sec_m = next((m for m in self.monitors if not m.get("primary")), None)
+        if not sec_m:
+            idx = self.monitor_combo.current()
+            if 0 <= idx < len(self.monitors):
+                sec_m = self.monitors[idx]
+            else:
+                self._set_status("未检测到副屏显示器", self.RED)
+                return
+
+        self._set_status("正在归拢桌面图标到副屏...", self.MUTED)
+
+        def worker():
+            cnt, success = self._gather_desktop_icons_to_monitor(sec_m)
+            self.icon_queue.put((success, cnt, "副屏"))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    @staticmethod
+    def _gather_desktop_icons_to_monitor(target_monitor):
+        """精准将桌面所有图标整齐排列至指定显示器（支持主屏/副屏，彻底解除 Windows 跨屏漂移散落）"""
+        user32 = ctypes.windll.user32
+        kernel32 = ctypes.windll.kernel32
+
+        desk = user32.OpenDesktopW("Default", 0, False, 0x00020000 | 0x01FF)
+        if desk:
+            user32.SetThreadDesktop(desk)
+
+        progman = user32.FindWindowW("Progman", None)
+        shell_view = user32.FindWindowExW(progman, 0, "SHELLDLL_DefView", None)
+        if not shell_view:
+            worker = 0
+            while True:
+                worker = user32.FindWindowExW(0, worker, "WorkerW", None)
+                if not worker:
+                    break
+                shell_view = user32.FindWindowExW(worker, 0, "SHELLDLL_DefView", None)
+                if shell_view:
+                    break
+
+        if not shell_view:
+            return 0, False
+
+        listview = user32.FindWindowExW(shell_view, 0, "SysListView32", None)
+        if not listview:
+            return 0, False
+
+        count = user32.SendMessageW(listview, 0x1004, 0, 0)
+        if count <= 0:
+            return 0, True
+
+        # 关闭 Windows 自带的 LVS_AUTOARRANGE（0x0100），防止 Windows 跨屏虚拟高度再次扰乱图标
+        style = user32.GetWindowLongW(listview, -16)
+        user32.SetWindowLongW(listview, -16, style & ~0x0100)
+
+        pid = ctypes.c_ulong()
+        user32.GetWindowThreadProcessId(listview, ctypes.byref(pid))
+        h_proc = kernel32.OpenProcess(0x0008 | 0x0010 | 0x0020, False, pid.value)
+        if not h_proc:
+            return 0, False
+
+        remote_buf = kernel32.VirtualAllocEx(h_proc, None, ctypes.sizeof(_POINT), 0x1000, 0x04)
+        if not remote_buf:
+            kernel32.CloseHandle(h_proc)
+            return 0, False
+
+        # 将屏幕物理坐标转换为 SysListView32 的 Client 客户区坐标
+        pt_tl = _POINT(target_monitor["x"], target_monitor["y"])
+        pt_br = _POINT(target_monitor["x"] + target_monitor["width"], target_monitor["y"] + target_monitor["height"])
+        user32.ScreenToClient(listview, ctypes.byref(pt_tl))
+        user32.ScreenToClient(listview, ctypes.byref(pt_br))
+
+        start_x = pt_tl.x + 20
+        start_y = pt_tl.y + 20
+        max_y = pt_br.y - 120
+        dx = 112
+        dy = 125
+
+        cur_x = start_x
+        cur_y = start_y
+        pt = _POINT()
+
+        for i in range(count):
+            pt.x = cur_x
+            pt.y = cur_y
+            kernel32.WriteProcessMemory(h_proc, remote_buf, ctypes.byref(pt), ctypes.sizeof(_POINT), None)
+            user32.SendMessageW(listview, 0x1031, i, remote_buf) # LVM_SETITEMPOSITION32
+            cur_y += dy
+            if cur_y + dy > max_y:
+                cur_y = start_y
+                cur_x += dx
+
+        user32.InvalidateRect(listview, None, True)
+        user32.UpdateWindow(listview)
+
+        kernel32.VirtualFreeEx(h_proc, remote_buf, 0, 0x8000)
+        kernel32.CloseHandle(h_proc)
+        return count, True
 
     def _set_half_top(self):
         idx = self.monitor_combo.current()
