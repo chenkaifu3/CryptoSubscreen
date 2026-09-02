@@ -112,7 +112,7 @@ class CoinManager:
 
         self.root = tk.Tk()
         self.root.title("副屏显示管理")
-        self.root.geometry("580x700")
+        self.root.geometry("580x730")
         self.root.configure(bg=self.BG)
         self.root.resizable(False, False)
 
@@ -231,24 +231,49 @@ class CoinManager:
         split_row.pack(fill="x", pady=(2, 2))
 
         self._styled_btn(
-            split_row, "📺 占满全屏", self._set_fullscreen, "accent_border",
+            split_row, "📺 监控占全屏", self._set_fullscreen, "accent_border",
             font=("Microsoft YaHei UI", 8), side="left", fill="x", expand=True, padx=2
         )
         self._styled_btn(
-            split_row, "⬆️ 占上半屏 (1/2)", self._set_half_top, "accent_border",
+            split_row, "⬆️ 监控占上半屏", self._set_half_top, "accent_border",
             font=("Microsoft YaHei UI", 8), side="left", fill="x", expand=True, padx=2
         )
         self._styled_btn(
-            split_row, "⬇️ 占下半屏 (1/2)", self._set_half_bottom, "accent_border",
+            split_row, "⬇️ 监控占下半屏", self._set_half_bottom, "accent_border",
+            font=("Microsoft YaHei UI", 8), side="left", fill="x", expand=True, padx=2
+        )
+
+        # 副屏独立应用整屏排布工具（无需启动监控也可随时一键等分）
+        win_tool_row = tk.Frame(sec1, bg=self.CARD)
+        win_tool_row.pack(fill="x", pady=(2, 2))
+        self._label(win_tool_row, "整屏排布:").pack(side="left", padx=(0, 4))
+        self._styled_btn(
+            win_tool_row, "🪟 自动等分", lambda: self.tile_subscreen_windows("auto"), "accent_border",
+            font=("Microsoft YaHei UI", 8), side="left", fill="x", expand=True, padx=2
+        )
+        self._styled_btn(
+            win_tool_row, "⚏ 二等分", lambda: self.tile_subscreen_windows("half_2"), "muted",
+            font=("Microsoft YaHei UI", 8), side="left", fill="x", expand=True, padx=2
+        )
+        self._styled_btn(
+            win_tool_row, "☰ 三等分", lambda: self.tile_subscreen_windows("third_3"), "muted",
+            font=("Microsoft YaHei UI", 8), side="left", fill="x", expand=True, padx=2
+        )
+        self._styled_btn(
+            win_tool_row, "☷ 四等分", lambda: self.tile_subscreen_windows("quarter_4"), "muted",
             font=("Microsoft YaHei UI", 8), side="left", fill="x", expand=True, padx=2
         )
 
         tile_pref_row = tk.Frame(sec1, bg=self.CARD)
         tile_pref_row.pack(fill="x", pady=(2, 2))
-        self._label(tile_pref_row, "双窗排布:").pack(side="left", padx=(0, 4))
+        self._label(tile_pref_row, "多窗排布:").pack(side="left", padx=(0, 4))
         self.tile_mode_combo = ttk.Combobox(
             tile_pref_row,
-            values=["智能自适应 (自动识别视频宽屏/防重叠)", "强制上下双行堆叠 (每窗满宽1440)", "强制左右双列并排 (每窗半宽720)"],
+            values=[
+                "智能自适应 (自动规避重叠/视频宽屏优先)",
+                "上下多行堆叠 (每窗满宽横向视口)",
+                "左右多列并排 (竖向分栏垂直视口)"
+            ],
             state="readonly", font=("Microsoft YaHei UI", 8)
         )
         self.tile_mode_combo.current(0)
@@ -762,6 +787,146 @@ class CoinManager:
                 self._position_single_window(hwnd, rx, ry, rw, rh)
 
         return arranged_titles
+
+    def tile_subscreen_windows(self, mode="auto"):
+        """独立将副屏上打开的所有应用进行整屏自动排布（支持二等分、三等分、四等分等，无需启动币种监控）"""
+        idx = self.monitor_combo.current()
+        if idx < 0 or idx >= len(self.monitors):
+            return
+        m = self.monitors[idx]
+        mx, my, mw, mh = m["x"], m["y"], m["width"], m["height"]
+
+        user32 = ctypes.windll.user32
+        exclude_hwnds = set()
+        try:
+            mgr_hwnd = int(self.root.wm_frame(), 16)
+            exclude_hwnds.add(mgr_hwnd)
+        except Exception:
+            pass
+
+        candidates = []
+        seen_hwnds = set()
+
+        def enum_cb(hwnd, lparam):
+            if hwnd in exclude_hwnds or hwnd in seen_hwnds:
+                return 1
+            if not user32.IsWindowVisible(hwnd):
+                return 1
+            style = user32.GetWindowLongW(hwnd, -16) # GWL_STYLE
+            if style & 0x40000000: # WS_CHILD
+                return 1
+            ex_style = user32.GetWindowLongW(hwnd, -20) # GWL_EXSTYLE
+            if ex_style & 0x00000080: # WS_EX_TOOLWINDOW
+                return 1
+
+            title_len = user32.GetWindowTextLengthW(hwnd)
+            if title_len == 0:
+                return 1
+            buf = ctypes.create_unicode_buffer(title_len + 1)
+            user32.GetWindowTextW(hwnd, buf, title_len + 1)
+            title = buf.value
+
+            if title in ("Program Manager", "Settings", "Windows 输入体验", "副屏显示管理", "任务切换", "Snap Assist"):
+                return 1
+            if "副屏" in title or "CryptoSubscreen" in title:
+                return 1
+
+            rect = _RECT()
+            user32.GetWindowRect(hwnd, ctypes.byref(rect))
+            w = rect.right - rect.left
+            h = rect.bottom - rect.top
+            if w < 100 or h < 100:
+                return 1
+
+            cx = (rect.left + rect.right) // 2
+            cy = (rect.top + rect.bottom) // 2
+
+            if mx <= cx <= mx + mw and my <= cy <= my + mh:
+                candidates.append((hwnd, title))
+                seen_hwnds.add(hwnd)
+            return 1
+
+        _WNDENUMPROC = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
+        user32.EnumWindows(_WNDENUMPROC(enum_cb), 0)
+
+        # 若副屏当前没有窗口，尝试拉取当前主屏活动前台窗口
+        if not candidates:
+            fg_hwnd = user32.GetForegroundWindow()
+            if fg_hwnd and fg_hwnd not in exclude_hwnds and fg_hwnd not in seen_hwnds and user32.IsWindowVisible(fg_hwnd):
+                title_len = user32.GetWindowTextLengthW(fg_hwnd)
+                if title_len > 0:
+                    buf = ctypes.create_unicode_buffer(title_len + 1)
+                    user32.GetWindowTextW(fg_hwnd, buf, title_len + 1)
+                    title = buf.value
+                    if title and title not in ("副屏显示管理", "Program Manager"):
+                        candidates.append((fg_hwnd, title))
+                        seen_hwnds.add(fg_hwnd)
+
+        if not candidates:
+            self._set_status("副屏暂未检测到已打开的应用窗口", self.MUTED)
+            return
+
+        is_vertical = (mh > mw)
+        pref_idx = self.tile_mode_combo.current() if hasattr(self, "tile_mode_combo") else 0
+
+        # 根据指定模式或当前窗口数量计算整屏槽位
+        if mode == "half_2":
+            target_apps = candidates[:2]
+            # 二等分
+            if pref_idx == 1 or (pref_idx == 0 and is_vertical):
+                # 上下二等分（每窗满宽横向，避免 2K 竖屏宽度溢出）
+                h1 = mh // 2
+                h2 = mh - h1
+                slots = [(mx, my, mw, h1), (mx, my + h1, mw, h2)]
+            else:
+                # 左右二等分
+                w1 = mw // 2
+                w2 = mw - w1
+                slots = [(mx, my, w1, mh), (mx + w1, my, w2, mh)]
+            desc_text = "二等分"
+        elif mode == "third_3":
+            target_apps = candidates[:3]
+            # 三等分
+            if pref_idx == 1 or (pref_idx == 0 and is_vertical):
+                # 上中下三行堆叠 (1440 满宽 x 853 高，完美 16:9 比例)
+                h1 = mh // 3
+                h2 = mh // 3
+                h3 = mh - h1 - h2
+                slots = [(mx, my, mw, h1), (mx, my + h1, mw, h2), (mx, my + h1 + h2, mw, h3)]
+            elif pref_idx == 2 or (not is_vertical and pref_idx == 0):
+                # 左右三等分
+                w1 = mw // 3
+                w2 = mw // 3
+                w3 = mw - w1 - w2
+                slots = [(mx, my, w1, mh), (mx + w1, my, w2, mh), (mx + w1 + w2, my, w3, mh)]
+            else:
+                slots = self._calculate_tiling_slots(target_apps, mx, my, mw, mh)
+            desc_text = "三等分"
+        elif mode == "quarter_4":
+            target_apps = candidates[:4]
+            # 四等分：对称 2x2
+            w1 = mw // 2
+            w2 = mw - w1
+            h1 = mh // 2
+            h2 = mh - h1
+            slots = [
+                (mx, my, w1, h1),
+                (mx + w1, my, w2, h1),
+                (mx, my + h1, w1, h2),
+                (mx + w1, my + h1, w2, h2),
+            ]
+            desc_text = "四等分"
+        else: # auto
+            target_apps = candidates[:6]
+            slots = self._calculate_tiling_slots(target_apps, mx, my, mw, mh)
+            desc_text = f"自动等分({len(target_apps)}窗)"
+
+        arranged_titles = []
+        for (hwnd, title), (rx, ry, rw, rh) in zip(target_apps, slots):
+            self._position_single_window(hwnd, rx, ry, rw, rh)
+            arranged_titles.append(title[:8])
+
+        self._set_status(f"副屏应用已按 [{desc_text}] 整屏排布: {', '.join(arranged_titles)}", self.GREEN)
 
     def _set_half_top(self):
         idx = self.monitor_combo.current()
