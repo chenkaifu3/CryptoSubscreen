@@ -429,15 +429,16 @@ class HyperCyberMonitor:
         if n_syms == 1:
             cols = 1
         elif n_syms == 2:
-            cols = 2 if self.width >= self.height else 1
+            cols = 1 if self.height >= self.width * 1.2 else 2
         elif n_syms == 3:
-            cols = 3 if self.width >= self.height * 1.5 else (1 if self.height >= self.width * 1.5 else 2)
+            cols = 1 if self.height >= self.width * 1.8 else (3 if self.width >= self.height * 1.5 else 2)
         elif n_syms <= 4:
-            cols = 2
+            # 极度纵向竖屏时单列排版更饱满大气，半屏/横屏时 2 列 2 行
+            cols = 1 if self.height >= self.width * 1.6 else 2
         elif n_syms <= 6:
-            cols = 3 if self.width >= self.height else 2
+            cols = 2 if self.height >= self.width * 1.3 else 3
         else:
-            cols = 4 if self.width >= self.height else 3
+            cols = 2 if self.height >= self.width * 1.3 else 4
 
         for i, sym in enumerate(self.symbols):
             r, c = divmod(i, cols)
@@ -752,12 +753,23 @@ class HyperCyberMonitor:
 
         # 第三行：底部背景辅助水平参考线
         approx_price_h = int(price_size * 1.25)
-        chart_top = y_price + approx_price_h + max(6, int(h * 0.03))
-        chart_bottom = h - max(16, int(h * 0.08))
+        raw_chart_top = y_price + approx_price_h + max(6, int(h * 0.03))
+        raw_chart_bottom = h - max(16, int(h * 0.08))
         chart_left = 12
         chart_right = w - 12
-        chart_h = chart_bottom - chart_top
         chart_w = chart_right - chart_left
+        avail_h = raw_chart_bottom - raw_chart_top
+
+        # 限制折线图最大高度比率 (不超过宽度的 60%)，防止在超长竖卡片下纵向严重拉伸失真
+        max_allowed_h = max(24, int(chart_w * 0.60))
+        if avail_h > max_allowed_h:
+            chart_top = raw_chart_bottom - max_allowed_h
+            chart_bottom = raw_chart_bottom
+            chart_h = max_allowed_h
+        else:
+            chart_top = raw_chart_top
+            chart_bottom = raw_chart_bottom
+            chart_h = max(0, avail_h)
 
         data["chart_geo"] = {
             "top": chart_top, "bottom": chart_bottom,

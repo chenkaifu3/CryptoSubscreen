@@ -1,8 +1,8 @@
 {
   "screen": {
-    "width": 1024,
-    "height": 768,
-    "x_offset": -1024,
+    "width": 1440,
+    "height": 2560,
+    "x_offset": -1440,
     "y_offset": 0
   },
   "symbols": [

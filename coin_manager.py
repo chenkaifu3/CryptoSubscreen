@@ -97,7 +97,7 @@ class CoinManager:
 
         self.root = tk.Tk()
         self.root.title("副屏显示管理")
-        self.root.geometry("580x640")
+        self.root.geometry("580x670")
         self.root.configure(bg=self.BG)
         self.root.resizable(False, False)
 
@@ -210,17 +210,33 @@ class CoinManager:
             e.bind("<FocusOut>", self._on_entry_edited)
             e.bind("<Return>", self._on_entry_edited)
 
-        # 快捷对齐按钮行
+        # 快捷分屏与对齐预设
+        split_row = tk.Frame(sec1, bg=self.CARD)
+        split_row.pack(fill="x", pady=(2, 2))
+
+        self._styled_btn(
+            split_row, "📺 占满全屏", self._set_fullscreen, "accent_border",
+            font=("Microsoft YaHei UI", 8), side="left", fill="x", expand=True, padx=2
+        )
+        self._styled_btn(
+            split_row, "⬆️ 占上半屏 (1/2)", self._set_half_top, "accent_border",
+            font=("Microsoft YaHei UI", 8), side="left", fill="x", expand=True, padx=2
+        )
+        self._styled_btn(
+            split_row, "⬇️ 占下半屏 (1/2)", self._set_half_bottom, "accent_border",
+            font=("Microsoft YaHei UI", 8), side="left", fill="x", expand=True, padx=2
+        )
+
         align_row = tk.Frame(sec1, bg=self.CARD)
         align_row.pack(fill="x", pady=(2, 3))
 
         self._styled_btn(
-            align_row, "📐 主屏左侧齐平 (-W,0)", self._align_left_top, "accent_border",
-            font=("Microsoft YaHei UI", 8), side="left", padx=(0, 8)
+            align_row, "📐 主屏左侧齐平 (-W,0)", self._align_left_top, "muted",
+            font=("Microsoft YaHei UI", 8), side="left", fill="x", expand=True, padx=2
         )
         self._styled_btn(
-            align_row, "🔄 重置为识别坐标", self._reset_to_detected_monitor, "muted",
-            font=("Microsoft YaHei UI", 8), side="left", padx=(0, 8)
+            align_row, "🔄 重置为系统识别坐标", self._reset_to_detected_monitor, "muted",
+            font=("Microsoft YaHei UI", 8), side="left", fill="x", expand=True, padx=2
         )
 
         # 显示属性复选框行
@@ -471,6 +487,41 @@ class CoinManager:
         self.y_var.set(str(m["y"]))
         self._auto_save()
         self._set_status(f"设备切换成功并自动保存", self.GREEN)
+
+    def _set_fullscreen(self):
+        idx = self.monitor_combo.current()
+        if 0 <= idx < len(self.monitors):
+            m = self.monitors[idx]
+            self.width_var.set(str(m["width"]))
+            self.height_var.set(str(m["height"]))
+            self.x_var.set(str(m["x"]))
+            self.y_var.set(str(m["y"]))
+            self._auto_save()
+            self._set_status(f"已设为全屏显示 ({m['width']}x{m['height']})", self.GREEN)
+
+    def _set_half_top(self):
+        idx = self.monitor_combo.current()
+        if 0 <= idx < len(self.monitors):
+            m = self.monitors[idx]
+            half_h = m["height"] // 2
+            self.width_var.set(str(m["width"]))
+            self.height_var.set(str(half_h))
+            self.x_var.set(str(m["x"]))
+            self.y_var.set(str(m["y"]))
+            self._auto_save()
+            self._set_status(f"已设为上半屏显示 ({m['width']}x{half_h})", self.GREEN)
+
+    def _set_half_bottom(self):
+        idx = self.monitor_combo.current()
+        if 0 <= idx < len(self.monitors):
+            m = self.monitors[idx]
+            half_h = m["height"] // 2
+            self.width_var.set(str(m["width"]))
+            self.height_var.set(str(half_h))
+            self.x_var.set(str(m["x"]))
+            self.y_var.set(str(m["y"] + half_h))
+            self._auto_save()
+            self._set_status(f"已设为下半屏显示 ({m['width']}x{half_h})", self.GREEN)
 
     def _align_left_top(self):
         try:
