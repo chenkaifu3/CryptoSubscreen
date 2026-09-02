@@ -506,8 +506,79 @@ class CoinManager:
             self._auto_save()
             self._set_status(f"已设为全屏显示 ({m['width']}x{m['height']})", self.GREEN)
 
+    @staticmethod
+    def _calculate_tiling_slots(n, tx, ty, tw, th):
+        """计算 n 个窗口在 (tx, ty, tw, th) 区域内的无重叠平铺网格坐标"""
+        if n <= 0:
+            return []
+        if n == 1:
+            return [(tx, ty, tw, th)]
+        if n == 2:
+            if tw >= th:
+                # 较宽或接近方形：左右双列平铺 (如 720x1280 竖屏半屏)
+                w1 = tw // 2
+                w2 = tw - w1
+                return [(tx, ty, w1, th), (tx + w1, ty, w2, th)]
+            else:
+                # 较窄较高：上下双行平铺
+                h1 = th // 2
+                h2 = th - h1
+                return [(tx, ty, tw, h1), (tx, ty + h1, tw, h2)]
+        if n == 3:
+            if tw >= th:
+                # 经典主从排版：左侧主窗口，右侧上下平分 2 个小窗口
+                w1 = tw // 2
+                w2 = tw - w1
+                h1 = th // 2
+                h2 = th - h1
+                return [
+                    (tx, ty, w1, th),
+                    (tx + w1, ty, w2, h1),
+                    (tx + w1, ty + h1, w2, h2),
+                ]
+            else:
+                # 上半部主窗口，下半部左右平分 2 个窗口
+                h1 = th // 2
+                h2 = th - h1
+                w1 = tw // 2
+                w2 = tw - w1
+                return [
+                    (tx, ty, tw, h1),
+                    (tx, ty + h1, w1, h2),
+                    (tx + w1, ty + h1, w2, h2),
+                ]
+        if n == 4:
+            # 2x2 四宫格对称平铺
+            w1 = tw // 2
+            w2 = tw - w1
+            h1 = th // 2
+            h2 = th - h1
+            return [
+                (tx, ty, w1, h1),
+                (tx + w1, ty, w2, h1),
+                (tx, ty + h1, w1, h2),
+                (tx + w1, ty + h1, w2, h2),
+            ]
+
+        # n >= 5: 自适应行列动态网格
+        cols = 3 if tw >= th else 2
+        rows = (n + cols - 1) // cols
+        cell_h = th // rows
+        slots = []
+        for i in range(n):
+            r = i // cols
+            c = i % cols
+            items_in_this_row = min(cols, n - r * cols)
+            cell_w = tw // items_in_this_row
+            rx = tx + c * cell_w
+            ry = ty + r * cell_h
+            rw = cell_w if c < items_in_this_row - 1 else (tw - c * cell_w)
+            rh = cell_h if r < rows - 1 else (th - r * cell_h)
+            slots.append((rx, ry, rw, rh))
+        return slots
+
     def _arrange_other_windows_to_rect(self, tx, ty, tw, th, monitor_rect):
-        """自动寻找副屏上的其他窗口（或当前前台窗口），并贴靠排列到指定区域"""
+        """自动寻找副屏上的其他窗口（或当前前台窗口），并无重叠平铺排布到指定区域"""
         user32 = ctypes.windll.user32
         SWP_NOZORDER = 0x0004
         SWP_SHOWWINDOW = 0x0040
@@ -526,9 +597,10 @@ class CoinManager:
 
         mx, my, mw, mh = monitor_rect
         candidates = []
+        seen_hwnds = set()
 
         def enum_cb(hwnd, lparam):
-            if hwnd in exclude_hwnds:
+            if hwnd in exclude_hwnds or hwnd in seen_hwnds:
                 return 1
             if not user32.IsWindowVisible(hwnd):
                 return 1
@@ -563,6 +635,7 @@ class CoinManager:
 
             if mx <= cx <= mx + mw and my <= cy <= my + mh:
                 candidates.append((hwnd, title))
+                seen_hwnds.add(hwnd)
             return 1
 
         _WNDENUMPROC = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
@@ -571,7 +644,7 @@ class CoinManager:
         # 如果副屏上无已放置窗口，尝试寻找用户前台操作窗口
         if not candidates:
             fg_hwnd = user32.GetForegroundWindow()
-            if fg_hwnd and fg_hwnd not in exclude_hwnds and user32.IsWindowVisible(fg_hwnd):
+            if fg_hwnd and fg_hwnd not in exclude_hwnds and fg_hwnd not in seen_hwnds and user32.IsWindowVisible(fg_hwnd):
                 title_len = user32.GetWindowTextLengthW(fg_hwnd)
                 if title_len > 0:
                     buf = ctypes.create_unicode_buffer(title_len + 1)
@@ -579,14 +652,19 @@ class CoinManager:
                     title = buf.value
                     if title and title not in ("副屏显示管理", "Program Manager"):
                         candidates.append((fg_hwnd, title))
+                        seen_hwnds.add(fg_hwnd)
+
+        # 最多平铺前 6 个活动窗口，避免极端窗口过多导致单元格过小
+        tile_candidates = candidates[:6]
+        slots = self._calculate_tiling_slots(len(tile_candidates), tx, ty, tw, th)
 
         arranged_titles = []
-        for hwnd, title in candidates:
+        for (hwnd, title), (rx, ry, rw, rh) in zip(tile_candidates, slots):
             try:
                 if user32.IsZoomed(hwnd) or user32.IsIconic(hwnd):
                     user32.ShowWindow(hwnd, SW_RESTORE)
                 user32.SetWindowPos(
-                    hwnd, 0, int(tx), int(ty), int(tw), int(th),
+                    hwnd, 0, int(rx), int(ry), int(rw), int(rh),
                     SWP_NOZORDER | SWP_SHOWWINDOW
                 )
                 arranged_titles.append(title[:10])
@@ -613,7 +691,10 @@ class CoinManager:
                     (m["x"], m["y"], m["width"], m["height"])
                 )
                 if arranged:
-                    other_str = f"，并联动吸附 [{', '.join(arranged)}] 至下半屏"
+                    if len(arranged) == 1:
+                        other_str = f"，并联动吸附 [{arranged[0]}] 至下半屏"
+                    else:
+                        other_str = f"，并自动平铺 {len(arranged)} 个应用至下半屏"
 
             self._set_status(f"已设为上半屏 ({m['width']}x{half_h}){other_str}", self.GREEN)
 
@@ -635,7 +716,10 @@ class CoinManager:
                     (m["x"], m["y"], m["width"], m["height"])
                 )
                 if arranged:
-                    other_str = f"，并联动吸附 [{', '.join(arranged)}] 至上半屏"
+                    if len(arranged) == 1:
+                        other_str = f"，并联动吸附 [{arranged[0]}] 至上半屏"
+                    else:
+                        other_str = f"，并自动平铺 {len(arranged)} 个应用至上半屏"
 
             self._set_status(f"已设为下半屏 ({m['width']}x{half_h}){other_str}", self.GREEN)
 
