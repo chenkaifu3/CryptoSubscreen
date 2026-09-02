@@ -25,6 +25,21 @@ class _RECT(ctypes.Structure):
     ]
 
 
+class _POINT(ctypes.Structure):
+    _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
+
+
+class WINDOWPLACEMENT(ctypes.Structure):
+    _fields_ = [
+        ("length", ctypes.c_uint),
+        ("flags", ctypes.c_uint),
+        ("showCmd", ctypes.c_uint),
+        ("ptMinPosition", _POINT),
+        ("ptMaxPosition", _POINT),
+        ("rcNormalPosition", _RECT),
+    ]
+
+
 class _MONITORINFOEXW(ctypes.Structure):
     _fields_ = [
         ("cbSize", ctypes.c_ulong),
@@ -97,7 +112,7 @@ class CoinManager:
 
         self.root = tk.Tk()
         self.root.title("副屏显示管理")
-        self.root.geometry("580x670")
+        self.root.geometry("580x700")
         self.root.configure(bg=self.BG)
         self.root.resizable(False, False)
 
@@ -227,6 +242,17 @@ class CoinManager:
             split_row, "⬇️ 占下半屏 (1/2)", self._set_half_bottom, "accent_border",
             font=("Microsoft YaHei UI", 8), side="left", fill="x", expand=True, padx=2
         )
+
+        tile_pref_row = tk.Frame(sec1, bg=self.CARD)
+        tile_pref_row.pack(fill="x", pady=(2, 2))
+        self._label(tile_pref_row, "双窗排布:").pack(side="left", padx=(0, 4))
+        self.tile_mode_combo = ttk.Combobox(
+            tile_pref_row,
+            values=["智能自适应 (自动识别视频宽屏/防重叠)", "强制上下双行堆叠 (每窗满宽1440)", "强制左右双列并排 (每窗半宽720)"],
+            state="readonly", font=("Microsoft YaHei UI", 8)
+        )
+        self.tile_mode_combo.current(0)
+        self.tile_mode_combo.pack(side="left", fill="x", expand=True, padx=(0, 2))
 
         align_row = tk.Frame(sec1, bg=self.CARD)
         align_row.pack(fill="x", pady=(2, 3))
@@ -507,37 +533,92 @@ class CoinManager:
             self._set_status(f"已设为全屏显示 ({m['width']}x{m['height']})", self.GREEN)
 
     @staticmethod
-    def _calculate_tiling_slots(n, tx, ty, tw, th):
+    def _is_video_or_wide_window(title):
+        keywords = [
+            "播放", "video", "player", "potplayer", "bilibili", "哔哩哔哩",
+            "爱奇艺", "腾讯视频", "优酷", "vlc", "mpc", "media player",
+            "电影", "tv", "netflix", "youtube"
+        ]
+        lt = title.lower()
+        return any(kw in lt for kw in keywords)
+
+    @staticmethod
+    def _position_single_window(hwnd, rx, ry, rw, rh):
+        """精准安全地将单个窗口（含视频播放器、DirectX独占层、Electron客户端）调整并定位至指定区域"""
+        user32 = ctypes.windll.user32
+        root_hwnd = user32.GetAncestor(hwnd, 2) # GA_ROOT
+        if root_hwnd:
+            hwnd = root_hwnd
+
+        # 1. 如果窗口处于最大化或全屏，先通过 WINDOWPLACEMENT 修改其持久化 normal 尺寸避免还原时弹回旧坐标
+        wp = WINDOWPLACEMENT()
+        wp.length = ctypes.sizeof(WINDOWPLACEMENT)
+        if user32.GetWindowPlacement(hwnd, ctypes.byref(wp)):
+            wp.rcNormalPosition.left = int(rx)
+            wp.rcNormalPosition.top = int(ry)
+            wp.rcNormalPosition.right = int(rx + rw)
+            wp.rcNormalPosition.bottom = int(ry + rh)
+            if wp.showCmd in (2, 3): # SW_SHOWMINIMIZED or SW_SHOWMAXIMIZED
+                wp.showCmd = 1 # SW_SHOWNORMAL
+            user32.SetWindowPlacement(hwnd, ctypes.byref(wp))
+
+        if user32.IsZoomed(hwnd) or user32.IsIconic(hwnd):
+            user32.ShowWindow(hwnd, 9) # SW_RESTORE
+
+        # 2. 携带 SWP_FRAMECHANGED (0x0020) 强制重绘 DirectComposition / D3D 交换链与非客户区视口
+        flags = 0x0020 | 0x0004 | 0x0040 # SWP_FRAMECHANGED | SWP_NOZORDER | SWP_SHOWWINDOW
+        user32.SetWindowPos(hwnd, 0, int(rx), int(ry), int(rw), int(rh), flags)
+
+        # 再次确认获取实际被系统允许的宽度（用于检测是否存在 minTrackWidth 限制）
+        rect = _RECT()
+        user32.GetWindowRect(hwnd, ctypes.byref(rect))
+        return rect.right - rect.left
+
+    def _calculate_tiling_slots(self, candidates, tx, ty, tw, th):
         """计算 n 个窗口在 (tx, ty, tw, th) 区域内的无重叠平铺网格坐标"""
+        n = len(candidates)
         if n <= 0:
             return []
         if n == 1:
             return [(tx, ty, tw, th)]
+
+        mode_idx = 0
+        if hasattr(self, "tile_mode_combo"):
+            mode_idx = self.tile_mode_combo.current()
+
+        # mode_idx: 0=智能自适应, 1=强制上下双行堆叠, 2=强制左右双列并排
         if n == 2:
-            if tw >= th:
-                # 较宽或接近方形：左右双列平铺 (如 720x1280 竖屏半屏)
-                w1 = tw // 2
-                w2 = tw - w1
-                return [(tx, ty, w1, th), (tx + w1, ty, w2, th)]
-            else:
-                # 较窄较高：上下双行平铺
+            force_rows = (mode_idx == 1)
+            force_cols = (mode_idx == 2)
+
+            if not force_cols and not force_rows:
+                # 智能自适应逻辑：
+                # 1. 若半宽 (tw // 2) 小于 850px（如 2K 竖屏 1440 宽分半只有 720px），
+                #    而窗口包含视频播放器（B站、爱优腾、PotPlayer 等有 800px+ 最小宽度限制且需要 16:9 横向宽屏视口），
+                #    自动采用「上下双行堆叠」，使每个窗口享有 1440 满宽度，彻底规避尺寸溢出和画面拉伸！
+                has_video_app = any(self._is_video_or_wide_window(title) for _, title in candidates)
+                if has_video_app and (tw // 2 < 850):
+                    force_rows = True
+                elif tw >= th:
+                    force_cols = True
+                else:
+                    force_rows = True
+
+            if force_rows:
+                # 上下双行堆叠（适合视频播放器、16:9宽屏应用，每窗享受 1440 满宽度）
                 h1 = th // 2
                 h2 = th - h1
                 return [(tx, ty, tw, h1), (tx, ty + h1, tw, h2)]
-        if n == 3:
-            if tw >= th:
-                # 经典主从排版：左侧主窗口，右侧上下平分 2 个小窗口
+            else:
+                # 左右双列并排（适合长网页、微信等垂直窗口）
                 w1 = tw // 2
                 w2 = tw - w1
-                h1 = th // 2
-                h2 = th - h1
-                return [
-                    (tx, ty, w1, th),
-                    (tx + w1, ty, w2, h1),
-                    (tx + w1, ty + h1, w2, h2),
-                ]
-            else:
-                # 上半部主窗口，下半部左右平分 2 个窗口
+                return [(tx, ty, w1, th), (tx + w1, ty, w2, th)]
+
+        if n == 3:
+            has_video_app = any(self._is_video_or_wide_window(title) for _, title in candidates)
+            if has_video_app or (tw < th) or mode_idx == 1:
+                # 上半部主窗口（全宽横向，视频播放器最佳视口），下半部左右分 2 个小窗
                 h1 = th // 2
                 h2 = th - h1
                 w1 = tw // 2
@@ -547,6 +628,18 @@ class CoinManager:
                     (tx, ty + h1, w1, h2),
                     (tx + w1, ty + h1, w2, h2),
                 ]
+            else:
+                # 经典主从：左侧主窗口，右侧上下分 2 个小窗
+                w1 = tw // 2
+                w2 = tw - w1
+                h1 = th // 2
+                h2 = th - h1
+                return [
+                    (tx, ty, w1, th),
+                    (tx + w1, ty, w2, h1),
+                    (tx + w1, ty + h1, w2, h2),
+                ]
+
         if n == 4:
             # 2x2 四宫格对称平铺
             w1 = tw // 2
@@ -580,14 +673,6 @@ class CoinManager:
     def _arrange_other_windows_to_rect(self, tx, ty, tw, th, monitor_rect):
         """自动寻找副屏上的其他窗口（或当前前台窗口），并无重叠平铺排布到指定区域"""
         user32 = ctypes.windll.user32
-        SWP_NOZORDER = 0x0004
-        SWP_SHOWWINDOW = 0x0040
-        SW_RESTORE = 9
-        WS_CHILD = 0x40000000
-        WS_EX_TOOLWINDOW = 0x00000080
-        GWL_STYLE = -16
-        GWL_EXSTYLE = -20
-
         exclude_hwnds = set()
         try:
             mgr_hwnd = int(self.root.wm_frame(), 16)
@@ -604,11 +689,11 @@ class CoinManager:
                 return 1
             if not user32.IsWindowVisible(hwnd):
                 return 1
-            style = user32.GetWindowLongW(hwnd, GWL_STYLE)
-            if style & WS_CHILD:
+            style = user32.GetWindowLongW(hwnd, -16) # GWL_STYLE
+            if style & 0x40000000: # WS_CHILD
                 return 1
-            ex_style = user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
-            if ex_style & WS_EX_TOOLWINDOW:
+            ex_style = user32.GetWindowLongW(hwnd, -20) # GWL_EXSTYLE
+            if ex_style & 0x00000080: # WS_EX_TOOLWINDOW
                 return 1
 
             title_len = user32.GetWindowTextLengthW(hwnd)
@@ -656,20 +741,25 @@ class CoinManager:
 
         # 最多平铺前 6 个活动窗口，避免极端窗口过多导致单元格过小
         tile_candidates = candidates[:6]
-        slots = self._calculate_tiling_slots(len(tile_candidates), tx, ty, tw, th)
+        slots = self._calculate_tiling_slots(tile_candidates, tx, ty, tw, th)
 
         arranged_titles = []
+        overflow_detected = False
+
         for (hwnd, title), (rx, ry, rw, rh) in zip(tile_candidates, slots):
-            try:
-                if user32.IsZoomed(hwnd) or user32.IsIconic(hwnd):
-                    user32.ShowWindow(hwnd, SW_RESTORE)
-                user32.SetWindowPos(
-                    hwnd, 0, int(rx), int(ry), int(rw), int(rh),
-                    SWP_NOZORDER | SWP_SHOWWINDOW
-                )
-                arranged_titles.append(title[:10])
-            except Exception:
-                pass
+            actual_w = self._position_single_window(hwnd, rx, ry, rw, rh)
+            arranged_titles.append(title[:10])
+            # 如果实际宽度明显大于分配的宽度（说明被应用自身 minTrackWidth 强制撑大导致重叠），触发自动回退保护
+            if actual_w > rw + 60:
+                overflow_detected = True
+
+        # 如果在左右双列模式下检测到重叠溢出，自动切换为上下双行堆叠（每窗享受满宽，绝不重叠）
+        if overflow_detected and len(tile_candidates) == 2 and slots[0][2] < tw:
+            h1 = th // 2
+            h2 = th - h1
+            fallback_slots = [(tx, ty, tw, h1), (tx, ty + h1, tw, h2)]
+            for (hwnd, _), (rx, ry, rw, rh) in zip(tile_candidates, fallback_slots):
+                self._position_single_window(hwnd, rx, ry, rw, rh)
 
         return arranged_titles
 
