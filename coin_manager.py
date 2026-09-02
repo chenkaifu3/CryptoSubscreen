@@ -110,6 +110,7 @@ class CoinManager:
         self.theme_var = tk.StringVar(value=self.cfg["display"].get("theme", "cyberpunk"))
         self.weather_var = tk.BooleanVar(value=self.cfg.get("weather", {}).get("enabled", True))
         self.gaming_var = tk.BooleanVar(value=self.cfg.get("gaming_mode", {}).get("enabled", True))
+        self.snap_other_windows_var = tk.BooleanVar(value=True)
         self.theme_btns = {}
 
         self._build_ui()
@@ -269,7 +270,13 @@ class CoinManager:
             bg=self.CARD, fg=self.TEXT, selectcolor="#1A1A1A",
             activebackground=self.CARD, font=("Microsoft YaHei UI", 8),
             bd=0, activeforeground=self.TEXT, command=self._auto_save
-        ).pack(side="left", padx=(0, 12))
+        ).pack(side="left", padx=(0, 10))
+        tk.Checkbutton(
+            opt_row, text="联动分屏吸附", variable=self.snap_other_windows_var,
+            bg=self.CARD, fg=self.TEXT, selectcolor="#1A1A1A",
+            activebackground=self.CARD, font=("Microsoft YaHei UI", 8),
+            bd=0, activeforeground=self.TEXT
+        ).pack(side="left", padx=(0, 10))
 
         # 主题风格色系切换（优雅 2x3 网格排版，每个按钮 170px 宽，绝不截断）
         theme_sec = tk.Frame(sec1, bg=self.CARD)
@@ -499,6 +506,95 @@ class CoinManager:
             self._auto_save()
             self._set_status(f"已设为全屏显示 ({m['width']}x{m['height']})", self.GREEN)
 
+    def _arrange_other_windows_to_rect(self, tx, ty, tw, th, monitor_rect):
+        """自动寻找副屏上的其他窗口（或当前前台窗口），并贴靠排列到指定区域"""
+        user32 = ctypes.windll.user32
+        SWP_NOZORDER = 0x0004
+        SWP_SHOWWINDOW = 0x0040
+        SW_RESTORE = 9
+        WS_CHILD = 0x40000000
+        WS_EX_TOOLWINDOW = 0x00000080
+        GWL_STYLE = -16
+        GWL_EXSTYLE = -20
+
+        exclude_hwnds = set()
+        try:
+            mgr_hwnd = int(self.root.wm_frame(), 16)
+            exclude_hwnds.add(mgr_hwnd)
+        except Exception:
+            pass
+
+        mx, my, mw, mh = monitor_rect
+        candidates = []
+
+        def enum_cb(hwnd, lparam):
+            if hwnd in exclude_hwnds:
+                return 1
+            if not user32.IsWindowVisible(hwnd):
+                return 1
+            style = user32.GetWindowLongW(hwnd, GWL_STYLE)
+            if style & WS_CHILD:
+                return 1
+            ex_style = user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
+            if ex_style & WS_EX_TOOLWINDOW:
+                return 1
+
+            title_len = user32.GetWindowTextLengthW(hwnd)
+            if title_len == 0:
+                return 1
+            buf = ctypes.create_unicode_buffer(title_len + 1)
+            user32.GetWindowTextW(hwnd, buf, title_len + 1)
+            title = buf.value
+
+            if title in ("Program Manager", "Settings", "Windows 输入体验", "副屏显示管理", "任务切换", "Snap Assist"):
+                return 1
+            if "副屏" in title or "CryptoSubscreen" in title:
+                return 1
+
+            rect = _RECT()
+            user32.GetWindowRect(hwnd, ctypes.byref(rect))
+            w = rect.right - rect.left
+            h = rect.bottom - rect.top
+            if w < 100 or h < 100:
+                return 1
+
+            cx = (rect.left + rect.right) // 2
+            cy = (rect.top + rect.bottom) // 2
+
+            if mx <= cx <= mx + mw and my <= cy <= my + mh:
+                candidates.append((hwnd, title))
+            return 1
+
+        _WNDENUMPROC = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
+        user32.EnumWindows(_WNDENUMPROC(enum_cb), 0)
+
+        # 如果副屏上无已放置窗口，尝试寻找用户前台操作窗口
+        if not candidates:
+            fg_hwnd = user32.GetForegroundWindow()
+            if fg_hwnd and fg_hwnd not in exclude_hwnds and user32.IsWindowVisible(fg_hwnd):
+                title_len = user32.GetWindowTextLengthW(fg_hwnd)
+                if title_len > 0:
+                    buf = ctypes.create_unicode_buffer(title_len + 1)
+                    user32.GetWindowTextW(fg_hwnd, buf, title_len + 1)
+                    title = buf.value
+                    if title and title not in ("副屏显示管理", "Program Manager"):
+                        candidates.append((fg_hwnd, title))
+
+        arranged_titles = []
+        for hwnd, title in candidates:
+            try:
+                if user32.IsZoomed(hwnd) or user32.IsIconic(hwnd):
+                    user32.ShowWindow(hwnd, SW_RESTORE)
+                user32.SetWindowPos(
+                    hwnd, 0, int(tx), int(ty), int(tw), int(th),
+                    SWP_NOZORDER | SWP_SHOWWINDOW
+                )
+                arranged_titles.append(title[:10])
+            except Exception:
+                pass
+
+        return arranged_titles
+
     def _set_half_top(self):
         idx = self.monitor_combo.current()
         if 0 <= idx < len(self.monitors):
@@ -509,7 +605,17 @@ class CoinManager:
             self.x_var.set(str(m["x"]))
             self.y_var.set(str(m["y"]))
             self._auto_save()
-            self._set_status(f"已设为上半屏显示 ({m['width']}x{half_h})", self.GREEN)
+
+            other_str = ""
+            if self.snap_other_windows_var.get():
+                arranged = self._arrange_other_windows_to_rect(
+                    m["x"], m["y"] + half_h, m["width"], half_h,
+                    (m["x"], m["y"], m["width"], m["height"])
+                )
+                if arranged:
+                    other_str = f"，并联动吸附 [{', '.join(arranged)}] 至下半屏"
+
+            self._set_status(f"已设为上半屏 ({m['width']}x{half_h}){other_str}", self.GREEN)
 
     def _set_half_bottom(self):
         idx = self.monitor_combo.current()
@@ -521,7 +627,17 @@ class CoinManager:
             self.x_var.set(str(m["x"]))
             self.y_var.set(str(m["y"] + half_h))
             self._auto_save()
-            self._set_status(f"已设为下半屏显示 ({m['width']}x{half_h})", self.GREEN)
+
+            other_str = ""
+            if self.snap_other_windows_var.get():
+                arranged = self._arrange_other_windows_to_rect(
+                    m["x"], m["y"], m["width"], half_h,
+                    (m["x"], m["y"], m["width"], m["height"])
+                )
+                if arranged:
+                    other_str = f"，并联动吸附 [{', '.join(arranged)}] 至上半屏"
+
+            self._set_status(f"已设为下半屏 ({m['width']}x{half_h}){other_str}", self.GREEN)
 
     def _align_left_top(self):
         try:

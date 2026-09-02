@@ -1,9 +1,9 @@
 {
   "screen": {
     "width": 1440,
-    "height": 2560,
+    "height": 1280,
     "x_offset": -1440,
-    "y_offset": 0
+    "y_offset": 1280
   },
   "symbols": [
     "BTCUSDT",
@@ -20,7 +20,7 @@
   "display": {
     "topmost": false,
     "borderless": true,
-    "theme": "pure_white"
+    "theme": "cyberpunk"
   },
   "weather": {
     "enabled": true,
@@ -30,7 +30,7 @@
     "update_ms": 600000
   },
   "gaming_mode": {
-    "enabled": false,
+    "enabled": true,
     "detect_lol": true,
     "detect_fullscreen": true,
     "pause_price_flash": true
