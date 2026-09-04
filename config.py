@@ -172,6 +172,8 @@ DEFAULT_CONFIG = {
         "detect_fullscreen": True,
         "pause_price_flash": True,
     },
+    "preset_coins": ["BTC", "ETH", "SOL", "BNB", "XRP", "DOGE", "PEPE", "PONS"],
+    "user_preset": ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT"],
     "proxy": "",
 }
 
@@ -191,6 +193,10 @@ def load_config():
             cfg[key].update(data[key])
     if "symbols" in data and isinstance(data["symbols"], list):
         cfg["symbols"] = [s.upper() for s in data["symbols"] if s]
+    if "preset_coins" in data and isinstance(data["preset_coins"], list):
+        cfg["preset_coins"] = [str(c).upper().strip() for c in data["preset_coins"] if str(c).strip()]
+    if "user_preset" in data and isinstance(data["user_preset"], list):
+        cfg["user_preset"] = [str(s).upper().strip() for s in data["user_preset"] if str(s).strip()]
     if "proxy" in data and isinstance(data["proxy"], str):
         cfg["proxy"] = data["proxy"]
     return cfg
