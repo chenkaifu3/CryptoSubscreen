@@ -113,9 +113,10 @@ class CoinManager:
 
         self.root = tk.Tk()
         self.root.title("副屏显示管理")
-        self.root.geometry("600x825")
+        self.root.geometry("600x790")
+        self.root.minsize(600, 750)
         self.root.configure(bg=self.BG)
-        self.root.resizable(False, False)
+        self.root.resizable(False, True)
 
         # 内部变量
         self.width_var = tk.StringVar()
@@ -130,13 +131,36 @@ class CoinManager:
         self.theme_btns = {}
         self.icon_queue = queue.Queue()
         self.search_queue = queue.Queue()
+        self.search_popup = None
 
         self._build_ui()
         self._load_to_ui()
         self._init_tray()
         self.root.bind("<Unmap>", self._on_unmap)
+        self.root.bind_all("<Button-1>", self._on_global_click, add="+")
+        self.root.bind("<Escape>", self._hide_search_popup)
+        self.root.bind("<Configure>", self._on_root_configure)
         self._poll_icon_queue()
         self._poll_search_queue()
+
+    def _on_root_configure(self, event):
+        """当主窗口移动或调整大小时，自动收起下拉悬浮窗"""
+        if event.widget == self.root and self.search_popup:
+            self._hide_search_popup()
+
+    def _on_global_click(self, event):
+        """点击主窗口空白处或其他组件时自动收起悬浮窗"""
+        if not self.search_popup:
+            return
+        w = event.widget
+        try:
+            while w:
+                if w == self.search_popup or w == getattr(self, "search_entry", None) or w == getattr(self, "search_btn", None):
+                    return
+                w = getattr(w, "master", None)
+        except Exception:
+            pass
+        self._hide_search_popup()
 
     def _label(self, parent, text, **kw):
         return tk.Label(
@@ -147,9 +171,9 @@ class CoinManager:
     def _section(self, parent, title):
         sec = tk.LabelFrame(
             parent, text=f" {title} ", bg=self.CARD, fg=self.ACCENT,
-            font=("Microsoft YaHei UI", 9, "bold"), bd=1, relief="solid", padx=12, pady=8
+            font=("Microsoft YaHei UI", 9, "bold"), bd=1, relief="solid", padx=12, pady=6
         )
-        sec.pack(fill="x", pady=(0, 8))
+        sec.pack(fill="x", pady=(0, 6))
         return sec
 
     def _style_button(self, btn, normal_bg, hover_bg, normal_fg, hover_fg):
@@ -380,26 +404,22 @@ class CoinManager:
         sec2 = self._section(root_pad, "🪙 监控币种配置 (全网检索与Meme币)")
 
         # 币种全网检索输入行 (支持 Robin/Solana/Base 链最新 Meme 币)
-        search_row = tk.Frame(sec2, bg=self.CARD)
-        search_row.pack(fill="x", pady=(2, 2))
-        self._label(search_row, "🔍 检索添加:").pack(side="left", padx=(0, 4))
+        self.search_row = tk.Frame(sec2, bg=self.CARD)
+        self.search_row.pack(fill="x", pady=(2, 2))
+        self._label(self.search_row, "🔍 检索添加:").pack(side="left", padx=(0, 4))
 
         self.search_entry = tk.Entry(
-            search_row, bg="#1E1E1E", fg=self.TEXT,
+            self.search_row, bg="#1E1E1E", fg=self.TEXT,
             insertbackground=self.TEXT, relief="flat", bd=0, font=("Microsoft YaHei UI", 9)
         )
         self.search_entry.pack(side="left", fill="x", expand=True, padx=(0, 6), ipady=2)
         self.search_entry.insert(0, "PONS")
         self.search_entry.bind("<Return>", lambda e: self._on_search_crypto())
 
-        self._styled_btn(
-            search_row, "🔎 全网检索", self._on_search_crypto, "accent_border",
+        self.search_btn = self._styled_btn(
+            self.search_row, "🔎 全网检索", self._on_search_crypto, "accent_border",
             font=("Microsoft YaHei UI", 8, "bold"), side="right"
         )
-
-        # 搜索结果动态展示容器
-        self.search_res_frame = tk.Frame(sec2, bg=self.CARD)
-        self.search_res_frame.pack(fill="x", pady=(0, 2))
 
         # 自定义输入行
         custom_row = tk.Frame(sec2, bg=self.CARD)
@@ -533,12 +553,140 @@ class CoinManager:
         if self._is_running():
             self._restart_monitor()
 
+    def _hide_search_popup(self, event=None):
+        """安全收起并销毁搜索结果悬浮窗"""
+        if self.search_popup:
+            try:
+                self.search_popup.destroy()
+            except Exception:
+                pass
+            self.search_popup = None
+
+    def _show_search_popup(self, results):
+        """以无边框悬浮窗（Floating Dropdown Popup）形式在搜索框正下方展开候选币种"""
+        self._hide_search_popup()
+        if not self.root.winfo_viewable():
+            return
+
+        self.root.update_idletasks()
+        try:
+            rx = self.search_row.winfo_rootx()
+            ry = self.search_row.winfo_rooty() + self.search_row.winfo_height() + 2
+            rw = self.search_row.winfo_width()
+            if rw < 300:
+                rw = 550
+        except Exception:
+            rx = self.root.winfo_rootx() + 20
+            ry = self.root.winfo_rooty() + 400
+            rw = 550
+
+        popup = tk.Toplevel(self.root)
+        popup.overrideredirect(True)
+        self.search_popup = popup
+
+        # 发光细边框
+        outer = tk.Frame(popup, bg=self.ACCENT, bd=1)
+        outer.pack(fill="both", expand=True)
+
+        # 深色背景内容区
+        inner = tk.Frame(outer, bg="#121824", padx=8, pady=6)
+        inner.pack(fill="both", expand=True, padx=1, pady=1)
+
+        # 标题栏与关闭小图标
+        header = tk.Frame(inner, bg="#121824")
+        header.pack(fill="x", pady=(0, 4))
+        tk.Label(
+            header, text="🎯 全网币种检索候选 (点击右侧 ➕ 即可一键添加):",
+            bg="#121824", fg=self.ACCENT, font=("Microsoft YaHei UI", 8, "bold")
+        ).pack(side="left")
+
+        close_lbl = tk.Label(
+            header, text=" ✕ ", bg="#121824", fg=self.MUTED,
+            font=("Microsoft YaHei UI", 8, "bold"), cursor="hand2"
+        )
+        close_lbl.pack(side="right")
+        close_lbl.bind("<Button-1>", lambda e: self._hide_search_popup())
+
+        if not results:
+            tk.Label(
+                inner, text="⚠️ 未检索到匹配币种，可检查代码拼写或直接在下方输入代码",
+                bg="#121824", fg=self.RED, font=("Microsoft YaHei UI", 8)
+            ).pack(anchor="w", pady=6)
+        else:
+            for item in results[:4]:
+                row = tk.Frame(inner, bg="#182234", padx=6, pady=3)
+                row.pack(fill="x", pady=2)
+
+                sym = item["symbol"]
+                src = item.get("source", "")
+                price = item.get("price", "0")
+                change = item.get("change", "0")
+                try:
+                    p_val = float(price)
+                    c_val = float(change)
+                    if p_val < 0.0001:
+                        p_str = f"${p_val:.8f}".rstrip("0")
+                    elif p_val < 1:
+                        p_str = f"${p_val:.4f}"
+                    else:
+                        p_str = f"${p_val:,.2f}"
+                    c_str = f"{c_val:+.2f}%"
+                    c_color = self.GREEN if c_val >= 0 else self.RED
+                except Exception:
+                    p_str = f"${price}"
+                    c_str = f"{change}%"
+                    c_color = self.TEXT
+
+                clean_name = sym.replace("USDT", "")
+                left_box = tk.Frame(row, bg="#182234")
+                left_box.pack(side="left", fill="x", expand=True)
+
+                tk.Label(
+                    left_box, text=clean_name, bg="#182234", fg=self.TEXT,
+                    font=("Consolas", 10, "bold")
+                ).pack(side="left", padx=(0, 6))
+
+                src_bg = "#162E3B" if "Gate" in src else "#382C13"
+                src_fg = "#00F0FF" if "Gate" in src else "#F3BA2F"
+                tk.Label(
+                    left_box, text=f" {src} ", bg=src_bg, fg=src_fg,
+                    font=("Microsoft YaHei UI", 7, "bold")
+                ).pack(side="left", padx=(0, 8))
+
+                tk.Label(
+                    left_box, text=p_str, bg="#182234", fg=self.TEXT,
+                    font=("Consolas", 9)
+                ).pack(side="left", padx=(0, 8))
+
+                tk.Label(
+                    left_box, text=c_str, bg="#182234", fg=c_color,
+                    font=("Consolas", 9, "bold")
+                ).pack(side="left")
+
+                add_btn = tk.Button(
+                    row, text="➕ 添加",
+                    command=lambda s=sym: (self._add_searched_symbol(s), self._hide_search_popup()),
+                    relief="flat", bd=0, padx=8, pady=2,
+                    font=("Microsoft YaHei UI", 8, "bold")
+                )
+                self._apply_btn_style(add_btn, "accent")
+                add_btn.pack(side="right")
+
+        popup.update_idletasks()
+        ph = popup.winfo_reqheight()
+        popup.geometry(f"{rw}x{ph}+{rx}+{ry}")
+        popup.lift()
+
     def _poll_search_queue(self):
-        """定期接收后台币种搜索结果，保证 Tkinter 界面响应流畅"""
+        """定期接收后台币种搜索结果，弹出悬浮下拉建议层"""
         try:
             while True:
-                results = self.search_queue.get_nowait()
-                self._render_search_results(results)
+                kw, results = self.search_queue.get_nowait()
+                if results:
+                    self._set_status(f"检索成功: 找到 {len(results)} 个匹配币种", self.GREEN)
+                else:
+                    self._set_status(f"检索完成: 未找到匹配 '{kw}' 的币种", self.MUTED)
+                self._show_search_popup(results)
         except queue.Empty:
             pass
         self.root.after(100, self._poll_search_queue)
@@ -549,63 +697,14 @@ class CoinManager:
         if not kw:
             return
 
-        for w in self.search_res_frame.winfo_children():
-            w.destroy()
-        loading_lbl = tk.Label(
-            self.search_res_frame, text=f"⏳ 正在全网检索 '{kw}' (Binance + Gate.io Meme池)...",
-            bg=self.CARD, fg=self.MUTED, font=("Microsoft YaHei UI", 8)
-        )
-        loading_lbl.pack(anchor="w", pady=(2, 2))
+        self._hide_search_popup()
+        self._set_status(f"⏳ 正在全网检索 '{kw}' (Binance + Gate.io Meme池)...", self.ACCENT)
 
         def worker():
             res = self.search_crypto(kw)
-            self.search_queue.put(res)
+            self.search_queue.put((kw, res))
 
         threading.Thread(target=worker, daemon=True).start()
-
-    def _render_search_results(self, results):
-        """将检索结果渲染为可一键点选添加的候选条目"""
-        for w in self.search_res_frame.winfo_children():
-            w.destroy()
-
-        if not results:
-            lbl = tk.Label(
-                self.search_res_frame, text="⚠️ 未检索到匹配币种，可检查代码或直接输入自定义代码",
-                bg=self.CARD, fg=self.RED, font=("Microsoft YaHei UI", 8)
-            )
-            lbl.pack(anchor="w", pady=(2, 2))
-            return
-
-        for item in results[:3]:
-            row = tk.Frame(self.search_res_frame, bg="#182234")
-            row.pack(fill="x", pady=1)
-
-            sym = item["symbol"]
-            src = item.get("source", "")
-            price = item.get("price", "0")
-            change = item.get("change", "0")
-            try:
-                p_val = float(price)
-                c_val = float(change)
-                p_str = f"${p_val:.4f}" if p_val < 1 else f"${p_val:,.2f}"
-                c_str = f"{c_val:+.2f}%"
-                c_color = self.GREEN if c_val >= 0 else self.RED
-            except Exception:
-                p_str = f"${price}"
-                c_str = f"{change}%"
-                c_color = self.TEXT
-
-            clean_name = sym.replace("USDT", "")
-            info_text = f"✨ {clean_name} [{src}] {p_str} ({c_str})"
-            tk.Label(
-                row, text=info_text, bg="#182234", fg=c_color,
-                font=("Microsoft YaHei UI", 8, "bold")
-            ).pack(side="left", padx=(6, 8), pady=2)
-
-            self._styled_btn(
-                row, "➕ 添加", lambda s=sym: self._add_searched_symbol(s), "accent",
-                font=("Microsoft YaHei UI", 7, "bold"), side="right", padx=4, pady=1
-            )
 
     def _add_searched_symbol(self, sym):
         """将检索到的币种加入当前监控列表并立即生效"""
@@ -620,8 +719,6 @@ class CoinManager:
             self.symbols_var.set(self._format_symbols_display(current))
             save_config(self.cfg)
             self._set_status(f"已成功添加并保存币种: {norm_sym}", self.GREEN)
-            for w in self.search_res_frame.winfo_children():
-                w.destroy()
             if self._is_running():
                 self._restart_monitor()
         else:
