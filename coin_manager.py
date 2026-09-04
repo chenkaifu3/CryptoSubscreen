@@ -113,7 +113,7 @@ class CoinManager:
 
         self.root = tk.Tk()
         self.root.title("副屏显示管理")
-        self.root.geometry("600x780")
+        self.root.geometry("600x825")
         self.root.configure(bg=self.BG)
         self.root.resizable(False, False)
 
@@ -129,12 +129,14 @@ class CoinManager:
         self.snap_other_windows_var = tk.BooleanVar(value=True)
         self.theme_btns = {}
         self.icon_queue = queue.Queue()
+        self.search_queue = queue.Queue()
 
         self._build_ui()
         self._load_to_ui()
         self._init_tray()
         self.root.bind("<Unmap>", self._on_unmap)
         self._poll_icon_queue()
+        self._poll_search_queue()
 
     def _label(self, parent, text, **kw):
         return tk.Label(
@@ -375,12 +377,34 @@ class CoinManager:
         # ==========================================
         # 2. 监控币种配置
         # ==========================================
-        sec2 = self._section(root_pad, "🪙 监控币种配置 (自定义与模版)")
+        sec2 = self._section(root_pad, "🪙 监控币种配置 (全网检索与Meme币)")
+
+        # 币种全网检索输入行 (支持 Robin/Solana/Base 链最新 Meme 币)
+        search_row = tk.Frame(sec2, bg=self.CARD)
+        search_row.pack(fill="x", pady=(2, 2))
+        self._label(search_row, "🔍 检索添加:").pack(side="left", padx=(0, 4))
+
+        self.search_entry = tk.Entry(
+            search_row, bg="#1E1E1E", fg=self.TEXT,
+            insertbackground=self.TEXT, relief="flat", bd=0, font=("Microsoft YaHei UI", 9)
+        )
+        self.search_entry.pack(side="left", fill="x", expand=True, padx=(0, 6), ipady=2)
+        self.search_entry.insert(0, "PONS")
+        self.search_entry.bind("<Return>", lambda e: self._on_search_crypto())
+
+        self._styled_btn(
+            search_row, "🔎 全网检索", self._on_search_crypto, "accent_border",
+            font=("Microsoft YaHei UI", 8, "bold"), side="right"
+        )
+
+        # 搜索结果动态展示容器
+        self.search_res_frame = tk.Frame(sec2, bg=self.CARD)
+        self.search_res_frame.pack(fill="x", pady=(0, 2))
 
         # 自定义输入行
         custom_row = tk.Frame(sec2, bg=self.CARD)
         custom_row.pack(fill="x", pady=(2, 4))
-        self._label(custom_row, "币种列表:").pack(side="left", padx=(0, 4))
+        self._label(custom_row, "当前监控:").pack(side="left", padx=(0, 4))
 
         self.symbol_entry = tk.Entry(
             custom_row, textvariable=self.symbols_var, bg="#1E1E1E", fg=self.TEXT,
@@ -390,16 +414,16 @@ class CoinManager:
         self.symbol_entry.bind("<Return>", lambda e: self._apply_custom_symbols())
 
         self._styled_btn(
-            custom_row, "💾 应用", self._apply_custom_symbols, "accent",
+            custom_row, "💾 保存应用", self._apply_custom_symbols, "accent",
             font=("Microsoft YaHei UI", 8, "bold"), side="right"
         )
 
-        # 常用标签快速点选行
+        # 常用标签快速点选行 (纳入最新热门 Meme 币 PONS)
         tags_frame = tk.Frame(sec2, bg=self.CARD)
         tags_frame.pack(fill="x", pady=(2, 4))
         self._label(tags_frame, "点选加减:").pack(side="left", padx=(0, 4))
 
-        quick_coins = ["BTC", "ETH", "SOL", "BNB", "XRP", "DOGE", "SUI", "PEPE"]
+        quick_coins = ["BTC", "ETH", "SOL", "BNB", "XRP", "DOGE", "PEPE", "PONS"]
         for coin in quick_coins:
             self._styled_btn(
                 tags_frame, coin, lambda c=coin: self._toggle_coin_tag(c), "muted",
@@ -415,11 +439,11 @@ class CoinManager:
             font=("Microsoft YaHei UI", 8), side="left", fill="x", expand=True, padx=2
         )
         self._styled_btn(
-            presets_row, "⛓️ 热门公链", lambda: self._apply_preset_and_restart(["BTCUSDT", "ETHUSDT", "SOLUSDT", "SUIUSDT"]), "accent_border",
+            presets_row, "🔥 热门Meme", lambda: self._apply_preset_and_restart(["PONSUSDT", "PEPEUSDT", "DOGEUSDT", "WIFUSDT"]), "accent_border",
             font=("Microsoft YaHei UI", 8), side="left", fill="x", expand=True, padx=2
         )
         self._styled_btn(
-            presets_row, "🐶 Meme板块", lambda: self._apply_preset_and_restart(["DOGEUSDT", "SHIBUSDT", "PEPEUSDT", "FLOKIUSDT"]), "accent_border",
+            presets_row, "⛓️ 热门公链", lambda: self._apply_preset_and_restart(["BTCUSDT", "ETHUSDT", "SOLUSDT", "SUIUSDT"]), "accent_border",
             font=("Microsoft YaHei UI", 8), side="left", fill="x", expand=True, padx=2
         )
         self._styled_btn(
@@ -508,6 +532,162 @@ class CoinManager:
         self._set_status(f"已更新币种: {self.symbols_var.get()}", self.GREEN)
         if self._is_running():
             self._restart_monitor()
+
+    def _poll_search_queue(self):
+        """定期接收后台币种搜索结果，保证 Tkinter 界面响应流畅"""
+        try:
+            while True:
+                results = self.search_queue.get_nowait()
+                self._render_search_results(results)
+        except queue.Empty:
+            pass
+        self.root.after(100, self._poll_search_queue)
+
+    def _on_search_crypto(self):
+        """启动后台线程进行跨平台全网币种检索（Binance + Gate.io Meme池）"""
+        kw = self.search_entry.get().strip()
+        if not kw:
+            return
+
+        for w in self.search_res_frame.winfo_children():
+            w.destroy()
+        loading_lbl = tk.Label(
+            self.search_res_frame, text=f"⏳ 正在全网检索 '{kw}' (Binance + Gate.io Meme池)...",
+            bg=self.CARD, fg=self.MUTED, font=("Microsoft YaHei UI", 8)
+        )
+        loading_lbl.pack(anchor="w", pady=(2, 2))
+
+        def worker():
+            res = self.search_crypto(kw)
+            self.search_queue.put(res)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _render_search_results(self, results):
+        """将检索结果渲染为可一键点选添加的候选条目"""
+        for w in self.search_res_frame.winfo_children():
+            w.destroy()
+
+        if not results:
+            lbl = tk.Label(
+                self.search_res_frame, text="⚠️ 未检索到匹配币种，可检查代码或直接输入自定义代码",
+                bg=self.CARD, fg=self.RED, font=("Microsoft YaHei UI", 8)
+            )
+            lbl.pack(anchor="w", pady=(2, 2))
+            return
+
+        for item in results[:3]:
+            row = tk.Frame(self.search_res_frame, bg="#182234")
+            row.pack(fill="x", pady=1)
+
+            sym = item["symbol"]
+            src = item.get("source", "")
+            price = item.get("price", "0")
+            change = item.get("change", "0")
+            try:
+                p_val = float(price)
+                c_val = float(change)
+                p_str = f"${p_val:.4f}" if p_val < 1 else f"${p_val:,.2f}"
+                c_str = f"{c_val:+.2f}%"
+                c_color = self.GREEN if c_val >= 0 else self.RED
+            except Exception:
+                p_str = f"${price}"
+                c_str = f"{change}%"
+                c_color = self.TEXT
+
+            clean_name = sym.replace("USDT", "")
+            info_text = f"✨ {clean_name} [{src}] {p_str} ({c_str})"
+            tk.Label(
+                row, text=info_text, bg="#182234", fg=c_color,
+                font=("Microsoft YaHei UI", 8, "bold")
+            ).pack(side="left", padx=(6, 8), pady=2)
+
+            self._styled_btn(
+                row, "➕ 添加", lambda s=sym: self._add_searched_symbol(s), "accent",
+                font=("Microsoft YaHei UI", 7, "bold"), side="right", padx=4, pady=1
+            )
+
+    def _add_searched_symbol(self, sym):
+        """将检索到的币种加入当前监控列表并立即生效"""
+        current = self._parse_symbols(self.symbols_var.get())
+        norm_sym = sym.upper().replace("_", "").replace("-", "")
+        if not norm_sym.endswith("USDT") and not norm_sym.endswith("USDC"):
+            norm_sym += "USDT"
+
+        if norm_sym not in current:
+            current.append(norm_sym)
+            self.cfg["symbols"] = current
+            self.symbols_var.set(self._format_symbols_display(current))
+            save_config(self.cfg)
+            self._set_status(f"已成功添加并保存币种: {norm_sym}", self.GREEN)
+            for w in self.search_res_frame.winfo_children():
+                w.destroy()
+            if self._is_running():
+                self._restart_monitor()
+        else:
+            self._set_status(f"币种 {norm_sym} 已在监控列表中", self.MUTED)
+
+    @staticmethod
+    def search_crypto(keyword):
+        """全网跨源币种检索引擎（支持 Binance 官方主流与 Gate.io 全网最新 Meme 币）"""
+        kw = keyword.strip().upper().replace("_", "").replace("-", "").replace("/", "")
+        if not kw:
+            return []
+        base = kw[:-4] if kw.endswith("USDT") and len(kw) > 4 else kw
+        results = []
+        b_sym = base + "USDT"
+
+        # 1. 探测 Binance 官方源
+        try:
+            r = requests.get(f"https://data-api.binance.vision/api/v3/ticker/24hr?symbol={b_sym}", timeout=2.5)
+            if r.status_code == 200:
+                d = r.json()
+                results.append({
+                    "symbol": b_sym,
+                    "source": "Binance 官方",
+                    "price": d.get("lastPrice", "0"),
+                    "change": d.get("priceChangePercent", "0"),
+                })
+        except Exception:
+            pass
+
+        # 2. 探测 Gate.io 全网/Meme 源 (精准对齐)
+        g_pair = base + "_USDT"
+        try:
+            r_g = requests.get(f"https://api.gateio.ws/api/v4/spot/tickers?currency_pair={g_pair}", timeout=2.5)
+            if r_g.status_code == 200 and r_g.json():
+                d = r_g.json()[0]
+                tag = "Gate.io (Robin/Meme新币)" if not results else "Gate.io"
+                results.append({
+                    "symbol": b_sym,
+                    "source": tag,
+                    "price": d.get("last", "0"),
+                    "change": d.get("change_percentage", "0"),
+                })
+        except Exception:
+            pass
+
+        # 3. 若无精准匹配，进行 Gate.io 现货币对模糊搜索
+        if not results:
+            try:
+                r_all = requests.get("https://api.gateio.ws/api/v4/spot/tickers", timeout=3.5)
+                if r_all.status_code == 200:
+                    for item in r_all.json():
+                        cp = item.get("currency_pair", "")
+                        if cp.endswith("_USDT") and base in cp:
+                            sym_name = cp.replace("_", "")
+                            results.append({
+                                "symbol": sym_name,
+                                "source": "Gate.io (Meme)",
+                                "price": item.get("last", "0"),
+                                "change": item.get("change_percentage", "0"),
+                            })
+                        if len(results) >= 4:
+                            break
+            except Exception:
+                pass
+
+        return results
 
     def _load_to_ui(self):
         s = self.cfg["screen"]

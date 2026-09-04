@@ -37,6 +37,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 BINANCE_HOSTS = ["https://data-api.binance.vision", "https://api.binance.com"]
+GATEIO_HOSTS = ["https://api.gateio.ws"]
 REQ_HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
 
 WMO_WEATHER_MAP = {
@@ -249,6 +250,7 @@ class BackendWorker:
         self.last_weather_time = 0.0
         self.last_fng_time = 0.0
         self.last_game_check_time = 0.0
+        self.symbol_sources = {}
 
         self.thread = threading.Thread(target=self._run_loop, daemon=True, name="DashboardWorker")
         self.thread.start()
@@ -313,47 +315,139 @@ class BackendWorker:
 
             time.sleep(0.3)
 
+    def _get_symbol_source(self, sym):
+        """智能路由币种数据源（优先 Binance 官方源，若未收录如最新 Meme 币则自适应路由至 Gate.io 全网池）"""
+        if sym in self.symbol_sources:
+            return self.symbol_sources[sym]
+        b_sym = sym.replace("_", "").upper()
+        # 探测 Binance 是否收录
+        for host in BINANCE_HOSTS:
+            try:
+                url = f"{host}/api/v3/ticker/24hr?symbol={b_sym}"
+                kwargs = {"timeout": 2, "headers": REQ_HEADERS}
+                if self.app.proxies:
+                    kwargs["proxies"] = self.app.proxies
+                r = requests.get(url, **kwargs)
+                if r.status_code == 200:
+                    self.symbol_sources[sym] = "binance"
+                    return "binance"
+            except Exception:
+                pass
+        self.symbol_sources[sym] = "gateio"
+        return "gateio"
+
     def _fetch_ticker(self):
         try:
-            symbols_json = json.dumps(self.app.symbols, separators=(",", ":"))
-            for host in BINANCE_HOSTS:
-                try:
-                    url = f"{host}/api/v3/ticker/24hr"
-                    kwargs = {"params": {"symbols": symbols_json}, "timeout": 3, "headers": REQ_HEADERS}
-                    if self.app.proxies:
-                        kwargs["proxies"] = self.app.proxies
-                    res = requests.get(url, **kwargs).json()
-                    if isinstance(res, list):
-                        stats = {item["symbol"]: item for item in res}
-                        self.app.safe_ui_call(self.app.apply_realtime_stats, stats)
-                        break
-                except Exception:
-                    continue
+            stats = {}
+            binance_syms = []
+            gate_syms = []
+
+            for sym in self.app.symbols:
+                src = self._get_symbol_source(sym)
+                if src == "binance":
+                    binance_syms.append(sym)
+                else:
+                    gate_syms.append(sym)
+
+            # 1. 批量拉取 Binance 主流币种
+            if binance_syms:
+                b_list = [s.replace("_", "").upper() for s in binance_syms]
+                symbols_json = json.dumps(b_list, separators=(",", ":"))
+                for host in BINANCE_HOSTS:
+                    try:
+                        url = f"{host}/api/v3/ticker/24hr"
+                        kwargs = {"params": {"symbols": symbols_json}, "timeout": 3, "headers": REQ_HEADERS}
+                        if self.app.proxies:
+                            kwargs["proxies"] = self.app.proxies
+                        res = requests.get(url, **kwargs).json()
+                        if isinstance(res, list):
+                            for item in res:
+                                stats[item["symbol"]] = item
+                            break
+                    except Exception:
+                        continue
+
+            # 2. 拉取 Gate.io 新兴 Meme 币种（支持 PONS、Robin、Solana、Base 等全网链上热门币）
+            for sym in gate_syms:
+                b_sym = sym.replace("_", "").upper()
+                g_pair = (b_sym[:-4] + "_USDT") if b_sym.endswith("USDT") else (b_sym + "_USDT")
+                for host in GATEIO_HOSTS:
+                    try:
+                        url = f"{host}/api/v4/spot/tickers?currency_pair={g_pair}"
+                        kwargs = {"timeout": 3, "headers": REQ_HEADERS}
+                        if self.app.proxies:
+                            kwargs["proxies"] = self.app.proxies
+                        res = requests.get(url, **kwargs).json()
+                        if isinstance(res, list) and res:
+                            item = res[0]
+                            stats[sym] = {
+                                "symbol": sym,
+                                "lastPrice": item.get("last", "0"),
+                                "priceChangePercent": item.get("change_percentage", "0"),
+                                "highPrice": item.get("high_24h", item.get("last", "0")),
+                                "lowPrice": item.get("low_24h", item.get("last", "0")),
+                                "volume": item.get("base_volume", "0"),
+                                "quoteVolume": item.get("quote_volume", "0"),
+                            }
+                            break
+                    except Exception:
+                        continue
+
+            if stats:
+                self.app.safe_ui_call(self.app.apply_realtime_stats, stats)
         except Exception:
             pass
 
     def _fetch_klines(self):
         results = {}
         for sym in self.app.symbols:
-            for host in BINANCE_HOSTS:
-                try:
-                    url = f"{host}/api/v3/klines?symbol={sym}&interval={self.app.klines_interval}&limit={self.app.klines_limit}"
-                    kwargs = {"timeout": 3, "headers": REQ_HEADERS}
-                    if self.app.proxies:
-                        kwargs["proxies"] = self.app.proxies
-                    res = requests.get(url, **kwargs).json()
-                    if isinstance(res, list):
-                        results[sym] = [
-                            {
-                                "close": float(k[4]),
-                                "volume": float(k[5]),
-                                "is_up": float(k[4]) >= float(k[1]),
-                            }
-                            for k in res
-                        ]
-                        break
-                except Exception:
-                    continue
+            src = self._get_symbol_source(sym)
+            b_sym = sym.replace("_", "").upper()
+            if src == "binance":
+                for host in BINANCE_HOSTS:
+                    try:
+                        url = f"{host}/api/v3/klines?symbol={b_sym}&interval={self.app.klines_interval}&limit={self.app.klines_limit}"
+                        kwargs = {"timeout": 3, "headers": REQ_HEADERS}
+                        if self.app.proxies:
+                            kwargs["proxies"] = self.app.proxies
+                        res = requests.get(url, **kwargs).json()
+                        if isinstance(res, list):
+                            results[sym] = [
+                                {
+                                    "close": float(k[4]),
+                                    "volume": float(k[5]),
+                                    "is_up": float(k[4]) >= float(k[1]),
+                                }
+                                for k in res
+                            ]
+                            break
+                    except Exception:
+                        continue
+            else:
+                # Gate.io K线接口 (时间正序矫正与蜡烛归一化)
+                g_pair = (b_sym[:-4] + "_USDT") if b_sym.endswith("USDT") else (b_sym + "_USDT")
+                for host in GATEIO_HOSTS:
+                    try:
+                        url = f"{host}/api/v4/spot/candlesticks?currency_pair={g_pair}&interval={self.app.klines_interval}&limit={self.app.klines_limit}"
+                        kwargs = {"timeout": 3, "headers": REQ_HEADERS}
+                        if self.app.proxies:
+                            kwargs["proxies"] = self.app.proxies
+                        res = requests.get(url, **kwargs).json()
+                        if isinstance(res, list):
+                            candles = res
+                            if candles and float(candles[0][0]) > float(candles[-1][0]):
+                                candles.reverse()
+                            results[sym] = [
+                                {
+                                    "close": float(k[2]),
+                                    "volume": float(k[1]),
+                                    "is_up": float(k[2]) >= float(k[5]),
+                                }
+                                for k in candles
+                            ]
+                            break
+                    except Exception:
+                        continue
         if results:
             self.app.safe_ui_call(self.app.apply_klines_data, results)
 
@@ -958,15 +1052,19 @@ class HyperCyberMonitor:
                     p_text = f"${price:,.2f}"
                 elif price >= 0.01:
                     p_text = f"${price:.4f}"
-                else:
+                elif price >= 0.0001:
                     p_text = f"${price:.6f}"
+                else:
+                    p_text = f"${price:.8f}"
 
                 def _fmt_hl(v):
                     if v >= 1000:
                         return f"${v / 1000:,.1f}K"
                     elif v >= 1:
                         return f"${v:,.2f}"
-                    return f"${v:.4f}"
+                    elif v >= 0.01:
+                        return f"${v:.4f}"
+                    return f"${v:.6f}"
 
                 h_text = _fmt_hl(h_val) if h_val else ""
                 l_text = _fmt_hl(l_val) if l_val else ""
