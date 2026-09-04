@@ -113,8 +113,8 @@ class CoinManager:
 
         self.root = tk.Tk()
         self.root.title("副屏显示管理")
-        self.root.geometry("600x790")
-        self.root.minsize(600, 750)
+        self.root.geometry("600x860")
+        self.root.minsize(600, 800)
         self.root.configure(bg=self.BG)
         self.root.resizable(False, True)
 
@@ -438,14 +438,6 @@ class CoinManager:
             font=("Microsoft YaHei UI", 8, "bold"), side="right"
         )
 
-        # 常用标签快速点选行 (支持检索添加动态沉淀与状态高亮)
-        self.tags_row = tk.Frame(sec2, bg=self.CARD)
-        self.tags_row.pack(fill="x", pady=(2, 3))
-        self._label(self.tags_row, "点选预设:").pack(side="left", anchor="n", padx=(0, 4), pady=(2, 0))
-
-        self.tags_container = tk.Frame(self.tags_row, bg=self.CARD)
-        self.tags_container.pack(side="left", fill="x", expand=True)
-
         # 快捷模版预设行 1：系统四大模版
         presets_row1 = tk.Frame(sec2, bg=self.CARD)
         presets_row1.pack(fill="x", pady=(2, 2))
@@ -544,52 +536,7 @@ class CoinManager:
         self.cfg["symbols"] = parsed
         self.symbols_var.set(self._format_symbols_display(parsed))
         save_config(self.cfg)
-        self._render_quick_tags()
         self._set_status(f"已更新监控币种: {self.symbols_var.get()}", self.GREEN)
-        if self._is_running():
-            self._restart_monitor()
-
-    def _render_quick_tags(self):
-        """动态渲染点选预设标签池，并在选中与未选之间展示高亮对比"""
-        if not hasattr(self, "tags_container"):
-            return
-        for w in self.tags_container.winfo_children():
-            w.destroy()
-
-        preset_coins = self.cfg.get("preset_coins", ["BTC", "ETH", "SOL", "BNB", "XRP", "DOGE", "PEPE", "PONS"])
-        seen = set()
-        clean_presets = []
-        for c in preset_coins:
-            c_clean = str(c).upper().replace("USDT", "").replace("USDC", "").strip()
-            if c_clean and c_clean not in seen:
-                seen.add(c_clean)
-                clean_presets.append(c_clean)
-
-        current_symbols = [s.replace("USDT", "").replace("USDC", "") for s in self._parse_symbols(self.symbols_var.get())]
-
-        for idx, coin in enumerate(clean_presets):
-            r, col = divmod(idx, 8)
-            is_active = coin in current_symbols
-            style = "accent" if is_active else "muted"
-            btn = self._styled_btn(
-                self.tags_container, coin, lambda c=coin: self._toggle_coin_tag(c), style,
-                font=("Consolas", 8, "bold")
-            )
-            btn.grid(row=r, column=col, padx=2, pady=1, sticky="w")
-
-    def _toggle_coin_tag(self, coin_base):
-        current = self._parse_symbols(self.symbols_var.get())
-        target = coin_base.upper() + "USDT"
-        if target in current:
-            if len(current) > 1:
-                current.remove(target)
-        else:
-            current.append(target)
-        self.cfg["symbols"] = current
-        self.symbols_var.set(self._format_symbols_display(current))
-        save_config(self.cfg)
-        self._render_quick_tags()
-        self._set_status(f"已更新币种: {self.symbols_var.get()}", self.GREEN)
         if self._is_running():
             self._restart_monitor()
 
@@ -602,7 +549,7 @@ class CoinManager:
         self.cfg["user_preset"] = current
         save_config(self.cfg)
         display_names = self._format_symbols_display(current)
-        self._set_status(f"已成功将 [{display_names}] 保存为我的自选预设！", self.GREEN)
+        self._set_status(f"已成功将 [{display_names}] 保存为自选预设！", self.GREEN)
 
     def _apply_user_preset(self):
         """一键载入并应用用户保存的自选预设模版"""
@@ -763,31 +710,22 @@ class CoinManager:
         threading.Thread(target=worker, daemon=True).start()
 
     def _add_searched_symbol(self, sym):
-        """将检索到的币种加入当前监控列表并立即生效，并沉淀入预设点选池"""
+        """将检索到的币种加入当前监控列表并立即生效"""
         current = self._parse_symbols(self.symbols_var.get())
         norm_sym = sym.upper().replace("_", "").replace("-", "")
         if not norm_sym.endswith("USDT") and not norm_sym.endswith("USDC"):
             norm_sym += "USDT"
-
-        coin_base = norm_sym.replace("USDT", "").replace("USDC", "")
-        preset_coins = self.cfg.get("preset_coins", ["BTC", "ETH", "SOL", "BNB", "XRP", "DOGE", "PEPE", "PONS"])
-        if coin_base not in preset_coins:
-            preset_coins.append(coin_base)
-            self.cfg["preset_coins"] = preset_coins
 
         if norm_sym not in current:
             current.append(norm_sym)
             self.cfg["symbols"] = current
             self.symbols_var.set(self._format_symbols_display(current))
             save_config(self.cfg)
-            self._set_status(f"已成功添加并保存预设: {coin_base} ({norm_sym})", self.GREEN)
-            self._render_quick_tags()
+            self._set_status(f"已成功添加币种: {norm_sym} (可点击下方「💾 将当前币种存为预设」保存)", self.GREEN)
             if self._is_running():
                 self._restart_monitor()
         else:
-            save_config(self.cfg)
-            self._render_quick_tags()
-            self._set_status(f"币种 {norm_sym} 已在监控列表中 (已同步预设池)", self.MUTED)
+            self._set_status(f"币种 {norm_sym} 已在当前监控列表中", self.MUTED)
 
     @staticmethod
     def search_crypto(keyword):
@@ -871,7 +809,6 @@ class CoinManager:
             self.monitor_combo.current(idx)
             
         self._update_launch_btn()
-        self._render_quick_tags()
 
     def _on_select_theme(self, theme_key):
         self.theme_var.set(theme_key)
@@ -1496,7 +1433,6 @@ class CoinManager:
         self.cfg["symbols"] = symbols
         self.symbols_var.set(self._format_symbols_display(symbols))
         save_config(self.cfg)
-        self._render_quick_tags()
         self._set_status(f"模版应用成功: {self.symbols_var.get()}", self.GREEN)
         
         # 只要副屏在运行，点击模版后立即平滑热重启应用新币种
