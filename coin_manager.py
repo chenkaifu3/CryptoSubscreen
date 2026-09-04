@@ -12,6 +12,7 @@ from tkinter import messagebox, ttk
 from PIL import Image, ImageDraw
 import pystray
 import requests
+import winreg
 
 from config import DEFAULT_CONFIG, THEMES, load_config, save_config
 from control import get_view_mode, set_view_mode
@@ -106,6 +107,39 @@ class CoinManager:
     GREEN = "#00FF66"
     RED = "#FF0055"
 
+    _RUN_KEY_PATH = r"Software\Microsoft\Windows\CurrentVersion\Run"
+    _APP_RUN_NAME = "CryptoSubscreen"
+
+    def _is_autostart_enabled(self):
+        try:
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, self._RUN_KEY_PATH, 0, winreg.KEY_READ) as key:
+                winreg.QueryValueEx(key, self._APP_RUN_NAME)
+                return True
+        except Exception:
+            return False
+
+    def _set_autostart(self, enabled):
+        try:
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, self._RUN_KEY_PATH, 0, winreg.KEY_WRITE) as key:
+                if enabled:
+                    pythonw_exe = os.path.join(os.path.dirname(sys.executable), "pythonw.exe")
+                    if not os.path.exists(pythonw_exe):
+                        pythonw_exe = sys.executable
+                    script_path = os.path.abspath(__file__)
+                    cmd = f'"{pythonw_exe}" "{script_path}" --autostart'
+                    winreg.SetValueEx(key, self._APP_RUN_NAME, 0, winreg.REG_SZ, cmd)
+                else:
+                    try:
+                        winreg.DeleteValue(key, self._APP_RUN_NAME)
+                    except FileNotFoundError:
+                        pass
+            self.cfg.setdefault("display", {})["autostart"] = enabled
+            save_config(self.cfg)
+            return True
+        except Exception as e:
+            self._set_status(f"设置开机自启失败: {e}", self.RED)
+            return False
+
     def __init__(self):
         self.cfg = load_config()
         self.monitors = get_monitors()
@@ -127,6 +161,7 @@ class CoinManager:
         self.theme_var = tk.StringVar(value=self.cfg["display"].get("theme", "cyberpunk"))
         self.weather_var = tk.BooleanVar(value=self.cfg.get("weather", {}).get("enabled", True))
         self.gaming_var = tk.BooleanVar(value=self.cfg.get("gaming_mode", {}).get("enabled", True))
+        self.autostart_var = tk.BooleanVar(value=self._is_autostart_enabled())
         self.snap_other_windows_var = tk.BooleanVar(value=True)
         self.theme_btns = {}
         self.icon_queue = queue.Queue()
@@ -142,6 +177,11 @@ class CoinManager:
         self.root.bind("<Configure>", self._on_root_configure)
         self._poll_icon_queue()
         self._poll_search_queue()
+
+        # 开机静默启动模式：隐藏管理窗口并直接在副屏静默亮屏启动监控
+        if ("--autostart" in sys.argv) or ("--silent" in sys.argv):
+            self.root.withdraw()
+            self.root.after(800, lambda: self._start_monitor(silent=True))
 
     def _on_root_configure(self, event):
         """当主窗口移动或调整大小时，自动收起下拉悬浮窗"""
@@ -376,6 +416,12 @@ class CoinManager:
             bg=self.CARD, fg=self.TEXT, selectcolor="#1A1A1A",
             activebackground=self.CARD, font=("Microsoft YaHei UI", 8),
             bd=0, activeforeground=self.TEXT, command=self._auto_save
+        ).pack(side="left", padx=(0, 18))
+        tk.Checkbutton(
+            opt_row2, text="开机自动运行副屏", variable=self.autostart_var,
+            bg=self.CARD, fg=self.TEXT, selectcolor="#1A1A1A",
+            activebackground=self.CARD, font=("Microsoft YaHei UI", 8),
+            bd=0, activeforeground=self.TEXT, command=self._on_ui_toggle_autostart
         ).pack(side="left", padx=(0, 18))
 
         # 主题风格色系切换（优雅 2x3 网格排版，每个按钮 170px 宽，绝不截断）
@@ -802,6 +848,7 @@ class CoinManager:
         self.theme_var.set(self.cfg["display"].get("theme", "cyberpunk"))
         self.weather_var.set(self.cfg.get("weather", {}).get("enabled", True))
         self.gaming_var.set(self.cfg.get("gaming_mode", {}).get("enabled", True))
+        self.autostart_var.set(self._is_autostart_enabled())
         self._update_theme_btn_styles()
 
         if self.monitors:
@@ -1491,6 +1538,7 @@ class CoinManager:
                 "topmost": self.topmost_var.get(),
                 "borderless": self.borderless_var.get(),
                 "theme": self.theme_var.get(),
+                "autostart": self._is_autostart_enabled(),
             },
             "weather": weather_cfg,
             "gaming_mode": gaming_cfg,
@@ -1698,6 +1746,7 @@ class CoinManager:
         menu = pystray.Menu(
             pystray.MenuItem("显示管理面板", self._on_tray_show, default=True),
             pystray.MenuItem("启动/关闭副屏", self._on_tray_toggle),
+            pystray.MenuItem("开机自动运行副屏", self._on_tray_toggle_autostart, checked=lambda item: self._is_autostart_enabled()),
             pystray.MenuItem("🐾 启动桌宠 (DigitalMate)", lambda icon, item: self.root.after(0, self._launch_digital_mate)),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("退出程序", self._on_tray_exit),
@@ -1709,6 +1758,31 @@ class CoinManager:
             menu
         )
         threading.Thread(target=self.tray_icon.run, daemon=True).start()
+
+    def _on_tray_toggle_autostart(self, icon=None, item=None):
+        new_state = not self._is_autostart_enabled()
+        self._set_autostart(new_state)
+        self.autostart_var.set(new_state)
+        msg = "已开启开机自动运行副屏" if new_state else "已取消开机启动"
+        color = self.GREEN if new_state else self.MUTED
+        self.root.after(0, lambda: self._set_status(msg, color))
+        if hasattr(self, "tray_icon") and self.tray_icon:
+            try:
+                self.tray_icon.update_menu()
+            except Exception:
+                pass
+
+    def _on_ui_toggle_autostart(self):
+        new_state = self.autostart_var.get()
+        self._set_autostart(new_state)
+        msg = "已开启开机自动运行副屏" if new_state else "已取消开机启动"
+        color = self.GREEN if new_state else self.MUTED
+        self._set_status(msg, color)
+        if hasattr(self, "tray_icon") and self.tray_icon:
+            try:
+                self.tray_icon.update_menu()
+            except Exception:
+                pass
 
     def _on_tray_show(self, icon=None, item=None):
         self.root.after(0, self._restore_window)

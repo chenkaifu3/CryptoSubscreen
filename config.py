@@ -158,6 +158,7 @@ DEFAULT_CONFIG = {
         "topmost": True,
         "borderless": True,
         "theme": "cyberpunk",
+        "autostart": False,
     },
     "weather": {
         "enabled": True,

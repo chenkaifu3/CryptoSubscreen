@@ -6,10 +6,12 @@
     "y_offset": 0
   },
   "symbols": [
-    "BTCUSDT",
+    "牛来USDT",
+    "MARSCOINUSDT",
+    "MEMEUSDT",
+    "PONSUSDT",
     "ETHUSDT",
-    "SOLUSDT",
-    "BNBUSDT"
+    "BTCUSDT"
   ],
   "update": {
     "realtime_ms": 5000,
@@ -20,7 +22,8 @@
   "display": {
     "topmost": false,
     "borderless": true,
-    "theme": "cyberpunk"
+    "theme": "cyberpunk",
+    "autostart": true
   },
   "weather": {
     "enabled": true,
@@ -49,10 +52,12 @@
     "MEME"
   ],
   "user_preset": [
-    "BTCUSDT",
+    "牛来USDT",
+    "MARSCOINUSDT",
+    "MEMEUSDT",
+    "PONSUSDT",
     "ETHUSDT",
-    "SOLUSDT",
-    "BNBUSDT"
+    "BTCUSDT"
   ],
   "proxy": ""
 }
