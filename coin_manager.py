@@ -128,6 +128,12 @@ class CoinManager:
                     if not os.path.exists(pythonw_exe):
                         pythonw_exe = sys.executable
                     script_path = os.path.abspath(__file__)
+                    try:
+                        buf = ctypes.create_unicode_buffer(512)
+                        if ctypes.windll.kernel32.GetShortPathNameW(script_path, buf, 512):
+                            script_path = buf.value
+                    except Exception:
+                        pass
                     cmd = f'"{pythonw_exe}" "{script_path}" --autostart'
                     winreg.SetValueEx(key, self._APP_RUN_NAME, 0, winreg.REG_SZ, cmd)
                 else:
@@ -186,6 +192,17 @@ class CoinManager:
         # 开机静默启动模式：开机保持仅连接 4K 主屏，管理工具在右下角托盘静默待命，不强行点亮或启动 2K 副屏监控
         if ("--autostart" in sys.argv) or ("--silent" in sys.argv):
             self.root.withdraw()
+            # 方案A：开机进入桌面 2.5 秒后（避开开机硬件加载峰值），若副屏被意外唤醒，自动静默压制熄灭副屏
+            self.root.after(2500, self._suppress_subscreen_on_boot)
+
+    def _suppress_subscreen_on_boot(self):
+        """开机进入桌面时，若检测到副屏被显卡驱动或自启软件意外唤醒，自动静默切回仅第二屏幕"""
+        try:
+            active_monitors = get_monitors()
+            if len(active_monitors) > 1:
+                self._switch_to_external_display()
+        except Exception:
+            pass
 
     @staticmethod
     def _switch_to_external_display():
