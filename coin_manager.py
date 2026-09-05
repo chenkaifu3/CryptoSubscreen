@@ -196,23 +196,21 @@ class CoinManager:
             self.root.after(2500, self._suppress_subscreen_on_boot)
 
     def _suppress_subscreen_on_boot(self):
-        """开机进入桌面时，若检测到副屏被显卡驱动或自启软件意外唤醒，自动静默切回仅第二屏幕"""
+        """开机进入桌面时，若检测到副屏被显卡驱动或自启软件意外唤醒，自动静默切回仅第二屏幕并归拢主屏图标"""
         try:
             active_monitors = get_monitors()
             if len(active_monitors) > 1:
                 self._switch_to_external_display()
+                # 延时 800ms 等屏幕分辨率稳定后，自动将可能散落错位的图标整齐归拢回 4K 主屏
+                self.root.after(800, self._gather_icons_to_primary)
         except Exception:
             pass
 
     @staticmethod
     def _switch_to_external_display():
-        """将 Windows 投影模式切换为‘仅第二屏幕 (External)’，确保关机保存 4K 单屏状态"""
+        """将 Windows 投影模式切换为‘仅第二屏幕 (External)’，确保关机保存 4K 单屏状态（纯 Win32 API 零外部进程）"""
         try:
-            subprocess.run(["DisplaySwitch.exe", "/external"], check=False, shell=True, creationflags=0x08000000)
-        except Exception:
-            pass
-
-        try:
+            # 纯内存级 Win32 API 调用，关机/重启时不启动任何子进程或 cmd.exe，彻底杜绝 0xc0000142 错误
             SDC_APPLY = 0x00000080
             SDC_TOPOLOGY_EXTERNAL = 0x00000008
             ctypes.windll.user32.SetDisplayConfig(0, None, 0, None, SDC_APPLY | SDC_TOPOLOGY_EXTERNAL)
@@ -289,8 +287,8 @@ class CoinManager:
     def _ensure_display_extend(self):
         """调用 Windows 底层显示接口将投影模式切换为‘扩展 (Extend)’，确保 2K 副屏被点亮"""
         try:
-            # 调用 Windows 官方投影工具切换至扩展模式
-            subprocess.run(["DisplaySwitch.exe", "/extend"], check=False, shell=True, creationflags=0x08000000)
+            # 调用 Windows 官方投影工具切换至扩展模式（禁用 shell=True，避免拉起 cmd.exe）
+            subprocess.run(["DisplaySwitch.exe", "/extend"], check=False, shell=False, creationflags=0x08000000)
         except Exception:
             pass
 
