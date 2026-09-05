@@ -1,5 +1,6 @@
 import copy
 import ctypes
+from ctypes import wintypes
 import json
 import os
 import queue
@@ -179,9 +180,94 @@ class CoinManager:
         self._poll_icon_queue()
         self._poll_search_queue()
 
+        # 启动关机/重启监听守护线程：关机前自动后台静默切至仅第二屏幕（4K主屏）
+        self._start_shutdown_listener()
+
         # 开机静默启动模式：开机保持仅连接 4K 主屏，管理工具在右下角托盘静默待命，不强行点亮或启动 2K 副屏监控
         if ("--autostart" in sys.argv) or ("--silent" in sys.argv):
             self.root.withdraw()
+
+    @staticmethod
+    def _switch_to_external_display():
+        """将 Windows 投影模式切换为‘仅第二屏幕 (External)’，确保关机保存 4K 单屏状态"""
+        try:
+            subprocess.run(["DisplaySwitch.exe", "/external"], check=False, shell=True, creationflags=0x08000000)
+        except Exception:
+            pass
+
+        try:
+            SDC_APPLY = 0x00000080
+            SDC_TOPOLOGY_EXTERNAL = 0x00000008
+            ctypes.windll.user32.SetDisplayConfig(0, None, 0, None, SDC_APPLY | SDC_TOPOLOGY_EXTERNAL)
+        except Exception:
+            pass
+
+    def _start_shutdown_listener(self):
+        """在后台守护线程中运行 Win32 消息循环，捕获系统关机/重启广播并静默切至仅第二屏幕"""
+        def _listener_worker():
+            try:
+                user32 = ctypes.windll.user32
+                kernel32 = ctypes.windll.kernel32
+
+                LRESULT = ctypes.c_ssize_t
+                WNDPROCTYPE = ctypes.WINFUNCTYPE(
+                    LRESULT, wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM
+                )
+
+                user32.DefWindowProcW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
+                user32.DefWindowProcW.restype = LRESULT
+
+                WM_QUERYENDSESSION = 0x0011
+                WM_ENDSESSION = 0x0016
+
+                def _wnd_proc(hwnd, msg, wparam, lparam):
+                    if msg in (WM_QUERYENDSESSION, WM_ENDSESSION):
+                        self._switch_to_external_display()
+                        return 1
+                    return user32.DefWindowProcW(hwnd, msg, wparam, lparam)
+
+                proc_ref = WNDPROCTYPE(_wnd_proc)
+
+                class WNDCLASS(ctypes.Structure):
+                    _fields_ = [
+                        ("style", wintypes.UINT),
+                        ("lpfnWndProc", WNDPROCTYPE),
+                        ("cbClsExtra", ctypes.c_int),
+                        ("cbWndExtra", ctypes.c_int),
+                        ("hInstance", wintypes.HINSTANCE),
+                        ("hIcon", wintypes.HANDLE),
+                        ("hCursor", wintypes.HANDLE),
+                        ("hbrBackground", wintypes.HANDLE),
+                        ("lpszMenuName", wintypes.LPCWSTR),
+                        ("lpszClassName", wintypes.LPCWSTR),
+                    ]
+
+                wc = WNDCLASS()
+                wc.lpfnWndProc = proc_ref
+                wc.lpszClassName = "CryptoSubscreenShutdownListener"
+                wc.hInstance = kernel32.GetModuleHandleW(None)
+
+                user32.RegisterClassW(ctypes.byref(wc))
+                hwnd = user32.CreateWindowExW(
+                    0, wc.lpszClassName, "ShutdownListener",
+                    0, 0, 0, 0, 0, 0, 0, wc.hInstance, 0
+                )
+
+                # 将本进程关机处理优先级提升至 0x3FF（最高级），优先早于其他普通程序接收关机信号
+                try:
+                    kernel32.SetProcessShutdownParameters(0x3FF, 0)
+                except Exception:
+                    pass
+
+                # 维持极简 Win32 消息泵，平时 0% CPU
+                msg = wintypes.MSG()
+                while user32.GetMessageW(ctypes.byref(msg), hwnd, 0, 0) > 0:
+                    user32.TranslateMessage(ctypes.byref(msg))
+                    user32.DispatchMessageW(ctypes.byref(msg))
+            except Exception:
+                pass
+
+        threading.Thread(target=_listener_worker, daemon=True).start()
 
     def _ensure_display_extend(self):
         """调用 Windows 底层显示接口将投影模式切换为‘扩展 (Extend)’，确保 2K 副屏被点亮"""
