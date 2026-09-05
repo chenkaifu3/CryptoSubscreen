@@ -178,10 +178,55 @@ class CoinManager:
         self._poll_icon_queue()
         self._poll_search_queue()
 
-        # 开机静默启动模式：隐藏管理窗口并直接在副屏静默亮屏启动监控
+        # 开机与启动时自动维护并确保小数字键盘 NumLock 处于激活点亮状态
+        self._ensure_numlock_active()
+
+        # 开机静默启动模式：开机保持仅连接 4K 主屏，管理工具在右下角托盘静默待命，不强行点亮或启动 2K 副屏监控
         if ("--autostart" in sys.argv) or ("--silent" in sys.argv):
             self.root.withdraw()
-            self.root.after(800, lambda: self._start_monitor(silent=True))
+
+    @staticmethod
+    def _ensure_numlock_active():
+        """确保小数字键盘 NumLock 处于开启点亮状态，并维护注册表默认开启"""
+        try:
+            # 1. 自动维护注册表，确保 Windows 开机锁屏登录界面永久默认开启小数字键盘
+            for root_key, subkey in [
+                (winreg.HKEY_USERS, r".DEFAULT\Control Panel\Keyboard"),
+                (winreg.HKEY_CURRENT_USER, r"Control Panel\Keyboard")
+            ]:
+                try:
+                    with winreg.OpenKey(root_key, subkey, 0, winreg.KEY_WRITE) as k:
+                        winreg.SetValueEx(k, "InitialKeyboardIndicators", 0, winreg.REG_SZ, "2")
+                except Exception:
+                    pass
+
+            # 2. 检测当前键盘硬件物理状态，若灭掉则自动毫秒级模拟按键点亮
+            VK_NUMLOCK = 0x90
+            state = ctypes.windll.user32.GetKeyState(VK_NUMLOCK) & 1
+            if not state:
+                ctypes.windll.user32.keybd_event(VK_NUMLOCK, 0x45, 1, 0)
+                ctypes.windll.user32.keybd_event(VK_NUMLOCK, 0x45, 1 | 2, 0)
+        except Exception:
+            pass
+
+    def _ensure_display_extend(self):
+        """调用 Windows 底层显示接口将投影模式切换为‘扩展 (Extend)’，确保 2K 副屏被点亮"""
+        try:
+            # 调用 Windows 官方投影工具切换至扩展模式
+            subprocess.run(["DisplaySwitch.exe", "/extend"], check=False, shell=True, creationflags=0x08000000)
+        except Exception:
+            pass
+
+        try:
+            # 备用：调用 Win32 SetDisplayConfig 应用扩展
+            SDC_APPLY = 0x00000080
+            SDC_TOPOLOGY_EXTEND = 0x00000004
+            ctypes.windll.user32.SetDisplayConfig(0, None, 0, None, SDC_APPLY | SDC_TOPOLOGY_EXTEND)
+        except Exception:
+            pass
+
+        # 刷新屏幕列表
+        self.monitors = get_monitors()
 
     def _on_root_configure(self, event):
         """当主窗口移动或调整大小时，自动收起下拉悬浮窗"""
@@ -1561,6 +1606,10 @@ class CoinManager:
         save_config(cfg)
         self.cfg = cfg
         try:
+            # 确保 Windows 投影模式切换为“扩展”，点亮 2K 副屏
+            self._ensure_display_extend()
+            time.sleep(0.5)
+
             self.monitor_proc = subprocess.Popen(
                 [sys.executable, self._coin_script()],
                 cwd=os.path.dirname(self._coin_script()),

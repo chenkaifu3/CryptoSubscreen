@@ -13,6 +13,27 @@
     "ETHUSDT",
     "BTCUSDT"
   ],
+  "preset_coins": [
+    "BTC",
+    "ETH",
+    "SOL",
+    "BNB",
+    "XRP",
+    "DOGE",
+    "PEPE",
+    "PONS",
+    "牛来",
+    "MARSCOIN",
+    "MEME"
+  ],
+  "user_preset": [
+    "牛来USDT",
+    "MARSCOINUSDT",
+    "MEMEUSDT",
+    "PONSUSDT",
+    "ETHUSDT",
+    "BTCUSDT"
+  ],
   "update": {
     "realtime_ms": 5000,
     "klines_ms": 300000,
@@ -38,26 +59,5 @@
     "detect_fullscreen": true,
     "pause_price_flash": true
   },
-  "preset_coins": [
-    "BTC",
-    "ETH",
-    "SOL",
-    "BNB",
-    "XRP",
-    "DOGE",
-    "PEPE",
-    "PONS",
-    "牛来",
-    "MARSCOIN",
-    "MEME"
-  ],
-  "user_preset": [
-    "牛来USDT",
-    "MARSCOINUSDT",
-    "MEMEUSDT",
-    "PONSUSDT",
-    "ETHUSDT",
-    "BTCUSDT"
-  ],
   "proxy": ""
 }
